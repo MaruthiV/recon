@@ -25,7 +25,47 @@ dev = [
     "pyright==1.1.414",
 ]
 
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "packages/domain/recon_domain",
+    "packages/storage/recon_storage",
+    "apps/provider_sim/provider_sim",
+    "apps/worker/recon_worker",
+    "evals/verifier/recon_verifier",
+    "evals/fixtures/recon_fixtures",
+]
+
 [tool.uv]
-package = false
 # releases must be >= 2 weeks old, bump at gate boundaries
 exclude-newer = "2026-10-03T00:00:00Z"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = ["live: calls a real model, needs RECON_LIVE=1 and a spend go"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["scratch"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+# formatter owns line length
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["recon_domain", "recon_storage", "provider_sim", "recon_worker", "recon_verifier", "recon_fixtures"]
+
+[tool.pyright]
+include = ["packages", "apps", "evals", "tests"]
+exclude = ["scratch", "**/migrations/versions"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
