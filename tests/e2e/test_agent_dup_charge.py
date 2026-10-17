@@ -261,8 +261,16 @@ async def test_duplicate_charge_agent_path(aw):
 
     [run] = await aw.rows(Run)
     print(f"\nlive run: {run.status} calls={run.model_calls} tools={run.tool_calls} est={run.est_cost_micros}µ$")
-    if os.environ.get("RECON_RECORD") == "1":
-        tape.save(LIVE_TAPE)
+    for u in await aw.rows(ModelUsage):
+        print(
+            f"  {u.agent:22} in={u.prompt_tokens} cached={u.cached_tokens} out={u.output_tokens} "
+            f"thoughts={u.thoughts_tokens} est={u.est_cost_micros}µ$ {u.latency_ms}ms"
+        )
+    print(f"  plan: {[p.payload for p in await aw.rows(Plan)]}")
+    # always keep the raw tape, only a passing run becomes the ci fixture
+    tape.save(Path(os.environ.get("RECON_TAPE_OUT", "results/tapes")) / f"{run.id}.jsonl")
     assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED"), (run.failure, out.problems)
     assert len(await aw.refunds()) == 1
     assert (await aw.verify(sd)).passed
+    if os.environ.get("RECON_RECORD") == "1":
+        tape.save(LIVE_TAPE)

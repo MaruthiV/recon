@@ -20,10 +20,11 @@ PRICING_DIR = Path(__file__).resolve().parents[2] / "pricing"
 
 @dataclass(frozen=True)
 class Budget:
-    max_model_calls: int = 8
+    # first live run needed 9 calls (3 + 2 + 4) and ~70k µ$ at list price, see DECISIONS
+    max_model_calls: int = 10
     max_tool_calls: int = 12
     max_seconds: int = 120
-    max_cost_micros: int = 100_000
+    max_cost_micros: int = 200_000
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
