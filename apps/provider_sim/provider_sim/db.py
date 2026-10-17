@@ -30,6 +30,8 @@ accounts = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("api_key", String, nullable=False, unique=True),
+    # restricted key, reads only (stripe rk_ style)
+    Column("read_key", String, unique=True),
 )
 
 payment_intents = Table(

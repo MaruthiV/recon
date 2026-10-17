@@ -16,6 +16,9 @@ dependencies = [
     "httpx==0.28.1",
 ]
 
+[project.scripts]
+recon = "recon_cli.main:main"
+
 [dependency-groups]
 dev = [
     "pytest==9.1.1",
@@ -35,6 +38,9 @@ packages = [
     "packages/storage/recon_storage",
     "apps/provider_sim/provider_sim",
     "apps/worker/recon_worker",
+    "apps/mcp/recon_mcp",
+    "apps/cli/recon_cli",
+    "agents/recon_agents",
     "evals/verifier/recon_verifier",
     "evals/fixtures/recon_fixtures",
 ]
@@ -50,6 +56,11 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 markers = ["live: calls a real model, needs RECON_LIVE=1 and a spend go"]
 addopts = "-p no:cacheprovider"
+# adk's own noise, not ours
+filterwarnings = [
+    "ignore:\\[EXPERIMENTAL\\]:UserWarning",
+    "ignore:MCPTool class is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 120
@@ -62,10 +73,20 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
 ignore = ["E501", "RUF001", "RUF002", "RUF003", "RUF012"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["recon_domain", "recon_storage", "provider_sim", "recon_worker", "recon_verifier", "recon_fixtures"]
+known-first-party = [
+    "recon_domain",
+    "recon_storage",
+    "provider_sim",
+    "recon_worker",
+    "recon_mcp",
+    "recon_agents",
+    "recon_cli",
+    "recon_verifier",
+    "recon_fixtures",
+]
 
 [tool.pyright]
-include = ["packages", "apps", "evals", "tests"]
+include = ["packages", "apps", "agents", "evals", "tests"]
 exclude = ["scratch", "**/migrations/versions"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"

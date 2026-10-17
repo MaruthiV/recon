@@ -72,7 +72,9 @@ class Executor:
             audit(s, tenant_id, "case_state", now, case_id=case_id, src=src.value, dst=dst.value, **why)
         return dst
 
-    async def record_plan(self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str) -> tuple[str, Verdict]:
+    async def record_plan(
+        self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str, run_id: str | None = None
+    ) -> tuple[str, Verdict]:
         now = self.clock.now()
         async with self.sessions() as s, s.begin():
             case = await get_case(s, tenant_id, case_id)
@@ -88,6 +90,7 @@ class Executor:
                     tenant_id=tenant_id,
                     case_id=case_id,
                     case_version=plan.case_version,
+                    run_id=run_id,
                     source=source,
                     payload=plan.model_dump(mode="json"),
                     material_hash=material_hash(plan, verdict.entitlement_ref),
@@ -113,8 +116,15 @@ class Executor:
         await self._move(tenant_id, case_id, dst, res, decision=v.decision.value)
         return Outcome(dst, res, v)
 
-    async def run(self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str = "scripted") -> Outcome:
-        plan_id, verdict = await self.record_plan(tenant_id, case_id, plan, source)
+    async def run(
+        self,
+        tenant_id: str,
+        case_id: str,
+        plan: ResolutionPlan,
+        source: str = "scripted",
+        run_id: str | None = None,
+    ) -> Outcome:
+        plan_id, verdict = await self.record_plan(tenant_id, case_id, plan, source, run_id)
         if verdict.decision is not Decision.AUTHORIZE:
             return await self._not_executed(tenant_id, case_id, plan, verdict)
         prepared = await self.ledger.prepare(tenant_id, case_id, plan_id, plan)

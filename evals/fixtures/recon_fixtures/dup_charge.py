@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -14,6 +16,7 @@ from recon_storage.models import (
     Customer,
     Order,
     Payment,
+    PolicyChunk,
     PolicyDocument,
     PolicyRule,
     Tenant,
@@ -21,17 +24,43 @@ from recon_storage.models import (
 from recon_verifier.db import labels
 
 MESSAGE = "I was charged twice for the same order. Please return the extra payment."
-TERMS_TEXT = (
-    "Refund terms v1. Section dup: if an order was captured more than once for the same amount, "
-    "the extra capture is refunded in full within 30 days of the charge."
+TERMS_SECTIONS = (
+    (
+        "dup",
+        "Duplicate charges",
+        "If an order was captured more than once for the same amount, the extra capture is refunded in full.",
+    ),
+    ("window", "Refund window", "Refund requests are accepted within 30 days of the charge."),
+    (
+        "returns",
+        "Returned items",
+        "Returned items are refunded at the item price once the return is received. Shipping is not refunded.",
+    ),
 )
-LIMITS_TEXT = "Operational limits v1. Refunds up to 100.00 USD are approved automatically."
+LIMITS_SECTIONS = (
+    (
+        "auto_approve",
+        "Automatic approval",
+        "Refunds up to 100.00 USD are approved automatically. Larger refunds need a supervisor.",
+    ),
+)
+
+
+def body_of(sections: tuple[tuple[str, str, str], ...]) -> str:
+    return "\n\n".join(f"{heading}. {text}" for _, heading, text in sections)
+
+
+def seeded_ids(seed: str) -> Callable[[str], str]:
+    # deterministic ids so recorded model runs replay against the same rows
+    n = itertools.count()
+    return lambda prefix: f"{prefix}_{hashlib.sha256(f'{seed}:{prefix}:{next(n)}'.encode()).hexdigest()[:24]}"
 
 
 @dataclass(frozen=True)
 class SeededCase:
     tenant_id: str
     api_key: str
+    read_key: str
     account: str
     case_id: str
     customer_id: str
@@ -53,22 +82,29 @@ async def seed_duplicate_charge(
     tenant: str = "acme",
     amount_minor: int = 4900,
     split: str = "dev",
+    ids: Callable[[str], str] = new_id,
 ) -> SeededCase:
-    tenant_id, account, api_key = f"t_{tenant}", f"acct_{tenant}", f"sk_test_{tenant}"
-    await sim.post("/sim/accounts", json={"id": account, "api_key": api_key}, headers=sim_operator)
+    tenant_id, account = f"t_{tenant}", f"acct_{tenant}"
+    api_key, read_key = f"sk_test_{tenant}", f"rk_test_{tenant}"
+    r = await sim.post(
+        "/sim/accounts", json={"id": account, "api_key": api_key, "read_key": read_key}, headers=sim_operator
+    )
+    r.raise_for_status()
     await sim.post("/sim/clock", json={"freeze_at": now.isoformat()}, headers=sim_operator)
     pis = []
     for _ in range(2):
         r = await sim.post(
-            "/sim/payment_intents", json={"account": account, "amount": amount_minor}, headers=sim_operator
+            "/sim/payment_intents",
+            json={"id": ids("pi"), "account": account, "amount": amount_minor},
+            headers=sim_operator,
         )
         r.raise_for_status()
         pis.append(r.json()["id"])
 
     placed = now - timedelta(days=2)
-    cus, order = new_id("cus"), new_id("ord")
-    pay_a, pay_b = new_id("pay"), new_id("pay")
-    terms, limits, case_id = new_id("pol"), new_id("pol"), new_id("case")
+    cus, order = ids("cus"), ids("ord")
+    pay_a, pay_b = ids("pay"), ids("pay")
+    terms, limits, case_id = ids("pol"), ids("pol"), ids("case")
     async with sessions() as s, s.begin():
         s.add(Tenant(id=tenant_id, name=tenant.title(), provider_account=account, created_at=placed))
         await s.flush()
@@ -99,10 +135,12 @@ async def seed_duplicate_charge(
                     captured_at=placed + timedelta(minutes=minutes),
                 )
             )
-        for pid, cls, title, body in (
-            (terms, "refund_terms", "Refund terms", TERMS_TEXT),
-            (limits, "operational_limits", "Operational limits", LIMITS_TEXT),
-        ):
+        docs = (
+            (terms, "refund_terms", "Refund terms", TERMS_SECTIONS),
+            (limits, "operational_limits", "Operational limits", LIMITS_SECTIONS),
+        )
+        for pid, cls, title, sections in docs:
+            body = body_of(sections)
             s.add(
                 PolicyDocument(
                     id=pid,
@@ -117,9 +155,21 @@ async def seed_duplicate_charge(
                 )
             )
         await s.flush()
+        for pid, _, _, sections in docs:
+            for section_id, heading, text in sections:
+                s.add(
+                    PolicyChunk(
+                        id=ids("chunk"),
+                        tenant_id=tenant_id,
+                        policy_document_id=pid,
+                        section_id=section_id,
+                        heading=heading,
+                        text=text,
+                    )
+                )
         s.add(
             PolicyRule(
-                id=new_id("rule"),
+                id=ids("rule"),
                 tenant_id=tenant_id,
                 policy_document_id=terms,
                 refund_window_days=30,
@@ -128,9 +178,7 @@ async def seed_duplicate_charge(
             )
         )
         s.add(
-            PolicyRule(
-                id=new_id("rule"), tenant_id=tenant_id, policy_document_id=limits, auto_approve_limit_minor=10_000
-            )
+            PolicyRule(id=ids("rule"), tenant_id=tenant_id, policy_document_id=limits, auto_approve_limit_minor=10_000)
         )
         s.add(
             Case(
@@ -147,7 +195,7 @@ async def seed_duplicate_charge(
         await s.flush()
         s.add(
             CaseMessage(
-                id=new_id("msg"), tenant_id=tenant_id, case_id=case_id, author="customer", body=MESSAGE, created_at=now
+                id=ids("msg"), tenant_id=tenant_id, case_id=case_id, author="customer", body=MESSAGE, created_at=now
             )
         )
 
@@ -174,4 +222,6 @@ async def seed_duplicate_charge(
                 case_id=case_id, tenant_id=tenant_id, split=split, family="duplicate_charge", label=label
             )
         )
-    return SeededCase(tenant_id, api_key, account, case_id, cus, order, pay_a, pay_b, pis[1], pis[0], terms, limits)
+    return SeededCase(
+        tenant_id, api_key, read_key, account, case_id, cus, order, pay_a, pay_b, pis[1], pis[0], terms, limits
+    )

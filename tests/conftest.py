@@ -1,15 +1,34 @@
+import asyncio
+import os
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+
+# before anything imports adk: skip the gce mtls probe, use the stateless mcp protocol
+os.environ.setdefault("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+os.environ.setdefault("ADK_ENABLE_MCP_MODERN_PROTOCOL", "1")
+
 import httpx
+import httpx2
 import pytest
+from google.adk.sessions import DatabaseSessionService
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from provider_sim.app import create_app
 from provider_sim.db import ensure_schema as ensure_sim_schema
+from recon_domain.connector import FakeClock
+from recon_mcp.provider import HttpRefundReader
+from recon_mcp.server import create_app as create_mcp_app
 from recon_storage.bootstrap import bootstrap
 from recon_storage.db import DbNames, admin_url, make_engine, sessions, url
 from recon_verifier.db import ensure_schema as ensure_eval_schema
 
 NAMES = DbNames.for_env("test")
 OPERATOR = "test-operator"
+RUN_KEY = b"test-run-token-key"
+MCP_URL = "http://localhost:8200/mcp"
+T = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
 SIM_TABLES = "accounts, payment_intents, refunds, idempotency, faults, requests_log"
 
 
@@ -24,8 +43,7 @@ async def dbs():
         await e.dispose()
 
 
-@pytest.fixture
-async def clean(dbs):
+async def truncate_all(dbs) -> None:
     async with dbs[NAMES.recon].begin() as c:
         tables = (
             await c.execute(
@@ -43,6 +61,11 @@ async def clean(dbs):
         )
     async with dbs[NAMES.eval].begin() as c:
         await c.execute(text("TRUNCATE labels, verdicts"))
+
+
+@pytest.fixture
+async def clean(dbs):
+    await truncate_all(dbs)
     yield
 
 
@@ -123,3 +146,66 @@ async def flaky_sim(sim_asgi, clean):
     async with httpx.AsyncClient(transport=transport, base_url="http://sim") as c:
         c.flaky = transport  # type: ignore[attr-defined]
         yield c
+
+
+@asynccontextmanager
+async def serving(service):
+    # the mcp lifespan's task group has to open and close in one task
+    ready, stop = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        async with service.lifespan():
+            ready.set()
+            await stop.wait()
+
+    task = asyncio.create_task(hold())
+    await ready.wait()
+    try:
+        yield service
+    finally:
+        stop.set()
+        await task
+
+
+class McpRead:
+    """in-process mcp-read wired to the in-process sim, readers keyed by tenant"""
+
+    def __init__(self, sim_client: httpx.AsyncClient) -> None:
+        self.sim = sim_client
+        self.read_keys: dict[str, str] = {}
+        self.service: Any = None
+
+    def reader_for(self, tenant_id: str) -> HttpRefundReader:
+        return HttpRefundReader(self.sim, self.read_keys[tenant_id])
+
+    def http_factory(self, headers=None, timeout=None, auth=None):
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=self.service),
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            base_url="http://localhost:8200",
+        )
+
+
+@pytest.fixture
+def clock():
+    return FakeClock(T)
+
+
+@pytest.fixture
+async def mcp_read(flaky_sim, app_sessions, clock):
+    m = McpRead(flaky_sim)
+    m.service = create_mcp_app(url("recon_mcp_read", NAMES.recon), RUN_KEY, m.reader_for, clock, host="localhost")
+    async with serving(m.service):
+        yield m
+    await m.service.engine.dispose()
+
+
+@pytest.fixture(scope="session")
+async def adk_sessions(dbs):
+    engine = create_async_engine(
+        url("recon_app", NAMES.recon), connect_args={"server_settings": {"search_path": "adk"}}
+    )
+    yield DatabaseSessionService(db_engine=engine)
+    await engine.dispose()

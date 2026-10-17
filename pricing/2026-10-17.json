@@ -1,0 +1,11 @@
+{
+  "snapshot": "2026-10-17",
+  "source": "https://ai.google.dev/gemini-api/docs/pricing (page last updated 2026-10-16, read 2026-10-17), standard tier, text, <=200k context",
+  "unit": "micro-usd per 1M tokens",
+  "models": {
+    "gemini-3.8-flash": {"input": 750000, "output": 3750000, "cached_input": 75000, "valid_until": "2027-01-01"},
+    "gemini-3.6-flash": {"input": 750000, "output": 3750000, "valid_until": "2027-01-01"},
+    "gemini-3.5-flash-lite": {"input": 300000, "output": 2500000},
+    "gemini-3.1-flash-lite": {"input": 250000, "output": 1500000}
+  }
+}

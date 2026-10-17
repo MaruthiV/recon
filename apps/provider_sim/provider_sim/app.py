@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from . import db
@@ -129,14 +129,22 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
             )
         )
 
-    async def auth(request: Request) -> str:
+    async def auth(request: Request, write: bool = False) -> str:
         header = request.headers.get("authorization", "")
         key = header.removeprefix("Bearer ").strip()
         async with engine.connect() as c:
-            account = (await c.execute(select(accounts.c.id).where(accounts.c.api_key == key))).scalar()
-        if not key or account is None:
+            row = (
+                await c.execute(
+                    select(accounts.c.id, accounts.c.api_key).where(
+                        or_(accounts.c.api_key == key, accounts.c.read_key == key)
+                    )
+                )
+            ).first()
+        if not key or row is None:
             raise HTTPException(401)
-        return account
+        if write and row.api_key != key:
+            raise HTTPException(403, "restricted key")
+        return row.id
 
     async def take_fault(account: str, kinds: tuple[str, ...], key: str | None, pi: str | None) -> dict | None:
         async with engine.begin() as c:
@@ -147,7 +155,8 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
                         " SELECT id FROM faults WHERE account = :a AND remaining > 0 AND kind = ANY(:k)"
                         " AND (idempotency_key IS NULL OR idempotency_key = :key)"
                         " AND (payment_intent IS NULL OR payment_intent = :pi)"
-                        " ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING kind, params"
+                        # block, don't skip: concurrent requests must each see the fault until it's used up
+                        " ORDER BY id LIMIT 1 FOR UPDATE) RETURNING kind, params"
                     ),
                     {"a": account, "k": list(kinds), "key": key, "pi": pi},
                 )
@@ -158,13 +167,19 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
     async def _http_error(request: Request, exc: HTTPException):
         if exc.status_code == 401:
             return _error(401, "invalid_request_error", "Invalid API Key provided.")
+        if exc.status_code == 403 and exc.detail == "restricted key":
+            return _error(
+                403,
+                "invalid_request_error",
+                "The provided key does not have the required permissions for this endpoint.",
+            )
         if exc.status_code == 403:
             return JSONResponse({"error": "operator only"}, status_code=403)
         return _error(exc.status_code, "invalid_request_error", str(exc.detail), code="resource_missing")
 
     @app.post("/v1/refunds")
     async def create_refund(request: Request):
-        account = await auth(request)
+        account = await auth(request, write=True)
         plain, meta = parse_form(await request.body())
         key = request.headers.get("idempotency-key")
 
@@ -433,7 +448,9 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
         operator(request)
         body = await request.json()
         async with engine.begin() as c:
-            await c.execute(accounts.insert().values(id=body["id"], api_key=body["api_key"]))
+            await c.execute(
+                accounts.insert().values(id=body["id"], api_key=body["api_key"], read_key=body.get("read_key"))
+            )
         return {"id": body["id"]}
 
     @app.post("/sim/payment_intents")

@@ -9,24 +9,67 @@ PKGS = {
     "recon_storage": "packages/storage/recon_storage",
     "provider_sim": "apps/provider_sim/provider_sim",
     "recon_worker": "apps/worker/recon_worker",
+    "recon_mcp": "apps/mcp/recon_mcp",
+    "recon_agents": "agents/recon_agents",
     "recon_verifier": "evals/verifier/recon_verifier",
     "recon_fixtures": "evals/fixtures/recon_fixtures",
 }
 # who may not import whom
 FORBIDDEN = {
-    "provider_sim": {"recon_domain", "recon_storage", "recon_worker", "recon_verifier", "recon_fixtures"},
-    "recon_verifier": {"recon_domain", "recon_storage", "recon_worker", "provider_sim", "recon_fixtures"},
+    "provider_sim": {
+        "recon_domain",
+        "recon_storage",
+        "recon_worker",
+        "recon_mcp",
+        "recon_agents",
+        "recon_verifier",
+        "recon_fixtures",
+    },
+    "recon_verifier": {
+        "recon_domain",
+        "recon_storage",
+        "recon_worker",
+        "recon_mcp",
+        "recon_agents",
+        "provider_sim",
+        "recon_fixtures",
+    },
     "recon_domain": {
         "recon_storage",
         "recon_worker",
+        "recon_mcp",
+        "recon_agents",
         "provider_sim",
         "recon_verifier",
         "sqlalchemy",
         "httpx",
         "fastapi",
+        "google",
+        "mcp",
     },
-    "recon_storage": {"recon_worker", "provider_sim", "recon_verifier", "httpx", "fastapi"},
-    "recon_worker": {"provider_sim", "recon_verifier", "recon_fixtures"},
+    "recon_storage": {
+        "recon_worker",
+        "recon_mcp",
+        "recon_agents",
+        "provider_sim",
+        "recon_verifier",
+        "httpx",
+        "fastapi",
+    },
+    "recon_worker": {"provider_sim", "recon_mcp", "recon_verifier", "recon_fixtures"},
+    # mcp-read can't reach the worker (ledger, write key) or the agents
+    "recon_mcp": {"recon_worker", "recon_agents", "provider_sim", "recon_verifier", "recon_fixtures", "google"},
+    # agents only see tools, never the db or the money path
+    "recon_agents": {
+        "recon_storage",
+        "recon_worker",
+        "recon_mcp",
+        "provider_sim",
+        "recon_verifier",
+        "recon_fixtures",
+        "sqlalchemy",
+        "httpx",
+    },
 }
 
 

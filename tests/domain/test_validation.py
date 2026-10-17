@@ -8,7 +8,7 @@ from recon_domain.money import Currency, Money
 from recon_domain.plan import Disposition, ReasonCode, ResolutionPlan, material_hash
 from recon_domain.policy import AuthorityClass, OperationalLimits, PolicyVersion, RefundTerms
 from recon_domain.proration import Rounding
-from recon_domain.validation import CaseFacts, ClaimFact, Decision, PaymentFact, validate
+from recon_domain.validation import CaseFacts, ClaimFact, Decision, PaymentFact, quote, validate
 
 T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
@@ -157,3 +157,44 @@ def test_plan_enums_parse():
     p = plan()
     assert p.recommended_disposition is Disposition.REFUND and p.reason_code is ReasonCode.DUPLICATE_CAPTURE
     assert replace(pay("x", 0), version=3).version == 3
+
+
+QUOTE_CASES = {
+    "fresh": facts(),
+    "partly_refunded": facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=1200))),
+    "claim_reserved": facts(claims={"dup:ord_1:pay_b": ClaimFact("claim_1", "dup:ord_1:pay_b", 4900, 900, 0)}),
+    "over_limit": facts(payments=(pay("pay_a", 0, amount=25_000), pay("pay_b", 3, amount=25_000))),
+}
+
+
+@pytest.mark.parametrize("name", sorted(QUOTE_CASES))
+def test_quote_is_exactly_what_validate_allows(name):
+    f = QUOTE_CASES[name]
+    q = quote(f, "pay_b", ReasonCode.DUPLICATE_CAPTURE)
+    assert q.eligible and q.amount is not None, q.reasons
+    claim_id = q.claim_id
+    at = validate(plan(amount_minor=q.amount.amount_minor, claim_id=claim_id), f)
+    assert at.decision in (Decision.AUTHORIZE, Decision.NEEDS_APPROVAL), at.reasons
+    over = validate(plan(amount_minor=q.amount.amount_minor + 1, claim_id=claim_id), f)
+    assert over.decision is Decision.REJECT
+
+
+@pytest.mark.parametrize(
+    ("f", "pid", "reason", "why"),
+    [
+        (facts(), "pay_a", ReasonCode.DUPLICATE_CAPTURE, "no earlier matching capture"),
+        (facts(), "pay_zz", ReasonCode.DUPLICATE_CAPTURE, "isn't on this case's order"),
+        (facts(), "pay_b", ReasonCode.RETURNED_ITEMS, "isn't automated"),
+        (facts(now=T0 + timedelta(days=31)), "pay_b", ReasonCode.DUPLICATE_CAPTURE, "refund window"),
+        (
+            facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))),
+            "pay_b",
+            ReasonCode.DUPLICATE_CAPTURE,
+            "nothing left",
+        ),
+    ],
+)
+def test_quote_says_why_not(f, pid, reason, why):
+    q = quote(f, pid, reason)
+    assert not q.eligible and q.amount is None
+    assert why in q.reasons[0]

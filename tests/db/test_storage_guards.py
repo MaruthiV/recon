@@ -74,7 +74,9 @@ async def test_mcp_read_role_sees_facts_not_ledger(refunded, dbs):
     try:
         await exec_as(engine, "SELECT count(*) FROM payments")
         await exec_as(engine, "SELECT count(*) FROM policy_documents")
-        for table in ("commands", "payment_reservations", "command_attempts", "audit_events", "plans", "tenants"):
+        await exec_as(engine, "SELECT count(*) FROM policy_chunks")
+        ledger = ("commands", "payment_reservations", "command_attempts", "audit_events", "plans", "tenants")
+        for table in (*ledger, "runs", "model_usage"):
             with pytest.raises(DBAPIError, match="permission denied"):
                 await exec_as(engine, f"SELECT 1 FROM {table}")
         with pytest.raises(DBAPIError, match="permission denied"):
@@ -93,3 +95,12 @@ async def test_agent_reachable_roles_cannot_reach_ground_truth(dbs, role, db):
             await exec_as(engine, "SELECT 1")
     finally:
         await engine.dispose()
+
+
+async def test_model_usage_is_append_only_for_the_app(app_sessions):
+    async with app_sessions() as s:
+        with pytest.raises(DBAPIError, match="permission denied"):
+            await s.execute(text("DELETE FROM model_usage"))
+    async with app_sessions() as s:
+        with pytest.raises(DBAPIError, match="permission denied"):
+            await s.execute(text("UPDATE model_usage SET est_cost_micros = 0"))

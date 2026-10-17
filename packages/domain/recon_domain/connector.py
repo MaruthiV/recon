@@ -61,7 +61,13 @@ class ReadFailed(Exception):
     pass
 
 
-class PaymentConnector(Protocol):
+class RefundReader(Protocol):
+    async def list_refunds(self, payment_intent: str) -> list[ProviderRefund]: ...
+
+    async def get_refund(self, refund_id: str) -> ProviderRefund | None: ...
+
+
+class PaymentConnector(RefundReader, Protocol):
     async def create_refund(
         self,
         *,
@@ -71,10 +77,6 @@ class PaymentConnector(Protocol):
         idempotency_key: str,
         metadata: dict[str, str],
     ) -> SubmitResult: ...
-
-    async def list_refunds(self, payment_intent: str) -> list[ProviderRefund]: ...
-
-    async def get_refund(self, refund_id: str) -> ProviderRefund | None: ...
 
 
 def state_for_refund_status(status: str) -> CommandState:

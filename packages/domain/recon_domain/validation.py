@@ -118,6 +118,64 @@ def _check_evidence(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class Quote:
+    payment_id: str
+    eligible: bool
+    reasons: tuple[str, ...] = ()
+    entitlement_ref: str | None = None
+    claim_id: str | None = None
+    amount: Money | None = None
+    terms_policy_id: str | None = None
+
+
+def quote(facts: CaseFacts, payment_id: str, reason: ReasonCode) -> Quote:
+    # arithmetic only, validate() still decides, tests pin the two together
+    def no(why: str) -> Quote:
+        return Quote(payment_id, False, (why,))
+
+    payment = next((p for p in facts.payments if p.id == payment_id), None)
+    if payment is None:
+        return no("payment isn't on this case's order")
+    if reason is not ReasonCode.DUPLICATE_CAPTURE:
+        return no(f"{reason} isn't automated yet")
+    if payment.status != "succeeded":
+        return no(f"payment status is {payment.status}")
+    if _original_capture(payment, facts.payments) is None:
+        return no("no earlier matching capture, charges look distinct")
+    try:
+        terms = applicable(facts.refund_terms, facts.order_placed_at)
+    except AmbiguousPolicy as e:
+        return no(str(e))
+    if terms is None:
+        return no("no applicable refund terms")
+    if not terms.duplicate_refund_allowed:
+        return no("policy doesn't allow duplicate-capture refunds")
+    if facts.now - payment.captured_at > timedelta(days=terms.refund_window_days):
+        return no(f"outside the {terms.refund_window_days}-day refund window")
+    ref = duplicate_capture_ref(facts.order_id, payment.id)
+    claim = facts.claims.get(ref)
+    left = remaining_minor(
+        ClaimBalance(
+            claim.permitted_minor if claim else payment.amount.amount_minor,
+            claim.reserved_minor if claim else 0,
+            claim.consumed_minor if claim else 0,
+        ),
+        PaymentBalance(payment.amount.amount_minor, payment.refunded_minor, payment.reserved_minor),
+    )
+    if left == 0:
+        return Quote(payment_id, False, ("nothing left to refund",), ref, claim.id if claim else None)
+    return Quote(
+        payment_id,
+        True,
+        (),
+        ref,
+        claim.id if claim else None,
+        Money(left, payment.amount.currency),
+        terms.policy.id,
+    )
+
+
 def validate(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
     if plan.case_id != facts.case_id:
         return _reject("plan is for a different case")

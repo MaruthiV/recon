@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -17,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING = {
@@ -151,6 +152,26 @@ class PolicyRule(Base):
     )
 
 
+class PolicyChunk(Base):
+    __tablename__ = "policy_chunks"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    policy_document_id: Mapped[str]
+    section_id: Mapped[str]
+    heading: Mapped[str]
+    text: Mapped[str] = mapped_column(Text)
+    tsv: Mapped[str] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('english', heading || ' ' || text)", persisted=True)
+    )
+    __table_args__ = (
+        UniqueConstraint("policy_document_id", "section_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "policy_document_id"], ["policy_documents.tenant_id", "policy_documents.id"]
+        ),
+        Index("ix_policy_chunks_tsv", "tsv", postgresql_using="gin"),
+    )
+
+
 class Case(Base):
     __tablename__ = "cases"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -181,12 +202,60 @@ class CaseMessage(Base):
     __table_args__ = (ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),)
 
 
+class Run(Base):
+    __tablename__ = "runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    case_id: Mapped[str]
+    stage: Mapped[str]
+    status: Mapped[str]
+    workflow_version: Mapped[str]
+    models: Mapped[dict[str, Any]]
+    budget: Mapped[dict[str, Any]]
+    adk_session_id: Mapped[str | None]
+    adk_invocation_id: Mapped[str | None]
+    evidence: Mapped[dict[str, Any] | None]
+    failure: Mapped[str | None] = mapped_column(Text)
+    model_calls: Mapped[int] = mapped_column(Integer, server_default="0")
+    tool_calls: Mapped[int] = mapped_column(Integer, server_default="0")
+    est_cost_micros: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    generation: Mapped[int] = mapped_column(Integer, server_default="0")
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
+    )
+
+
+class ModelUsage(Base):
+    __tablename__ = "model_usage"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str]
+    run_id: Mapped[str]
+    agent: Mapped[str]
+    model: Mapped[str]
+    invocation_id: Mapped[str | None]
+    prompt_tokens: Mapped[int] = mapped_column(Integer)
+    cached_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    thoughts_tokens: Mapped[int] = mapped_column(Integer)
+    tool_prompt_tokens: Mapped[int] = mapped_column(Integer)
+    est_cost_micros: Mapped[int] = mapped_column(BigInteger)
+    pricing_snapshot: Mapped[str]
+    latency_ms: Mapped[int | None]
+    raw: Mapped[dict[str, Any] | None]
+    created_at: Mapped[datetime]
+    __table_args__ = (ForeignKeyConstraint(["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"]),)
+
+
 class Plan(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     tenant_id: Mapped[str]
     case_id: Mapped[str]
     case_version: Mapped[int]
+    run_id: Mapped[str | None]
     source: Mapped[str]
     payload: Mapped[dict[str, Any]]
     material_hash: Mapped[str]
@@ -197,6 +266,7 @@ class Plan(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
+        ForeignKeyConstraint(["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"]),
     )
 
 
