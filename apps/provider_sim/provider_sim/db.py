@@ -32,6 +32,8 @@ accounts = Table(
     Column("api_key", String, nullable=False, unique=True),
     # restricted key, reads only (stripe rk_ style)
     Column("read_key", String, unique=True),
+    Column("webhook_url", String),
+    Column("webhook_secret", String),
 )
 
 payment_intents = Table(
@@ -65,7 +67,21 @@ refunds = Table(
     Column("pending_reason", String),
     Column("created", BigInteger, nullable=False),
     Column("seq", BigInteger, nullable=False),
+    # delayed effect: pending until settle_at, then settle_to
+    Column("settle_at", Ts),
+    Column("settle_to", String),
     CheckConstraint("amount > 0", name="refund_positive"),
+)
+
+events = Table(
+    "events",
+    metadata,
+    Column("seq", BigInteger, primary_key=True, autoincrement=True),
+    Column("id", String, nullable=False, unique=True),
+    Column("account", String, nullable=False),
+    Column("type", String, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("deliveries", Integer, nullable=False, server_default="0"),
 )
 
 idempotency = Table(
@@ -118,7 +134,7 @@ sim_state = Table(
     CheckConstraint("id = 1", name="single_row"),
 )
 
-DATA_TABLES = (accounts, payment_intents, refunds, idempotency, faults, requests_log)
+DATA_TABLES = (accounts, payment_intents, refunds, idempotency, faults, requests_log, events)
 
 
 async def now(c: AsyncConnection) -> datetime:

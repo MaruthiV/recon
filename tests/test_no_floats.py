@@ -10,12 +10,13 @@ MONEY_PACKAGES = [
     "packages/storage/recon_storage",
     "apps/provider_sim/provider_sim",
     "apps/worker/recon_worker",
+    "packages/provider/recon_provider",
     "apps/mcp/recon_mcp",
     "agents/recon_agents",
     "evals/verifier/recon_verifier",
 ]
 # timeouts and clock math are seconds, not money
-ALLOWED = {"apps/worker/recon_worker/connector.py", "apps/worker/recon_worker/ledger.py"}
+ALLOWED = {"apps/worker/recon_worker/ledger.py"}
 
 
 def offenders(path: Path) -> list[str]:

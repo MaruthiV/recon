@@ -44,6 +44,7 @@ class SubmitKind(StrEnum):
     REJECTED = "REJECTED"  # provider says it did nothing for this key
     MISMATCH = "MISMATCH"  # key reused with different params, our bug
     UNKNOWN = "UNKNOWN"  # 409, 429, 5xx, timeout, conn reset
+    REFUSED = "REFUSED"  # our own execution boundary said no, the provider was never called
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +78,50 @@ class PaymentConnector(RefundReader, Protocol):
         idempotency_key: str,
         metadata: dict[str, str],
     ) -> SubmitResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CommandRef:
+    # what the provider side needs to act on one persisted command, never built from model output
+    id: str
+    tenant_id: str
+    provider_payment_id: str
+    amount_minor: int
+    currency: str
+    idempotency_key: str
+    payload_hash: str
+    attempt: int
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+class ProviderGateway(Protocol):
+    async def submit(self, cmd: CommandRef) -> SubmitResult: ...
+
+    async def refunds_for(self, cmd: CommandRef) -> list[ProviderRefund]: ...
+
+    async def refund(self, cmd: CommandRef, refund_id: str) -> ProviderRefund | None: ...
+
+
+class DirectGateway:
+    """in-process gateway over a connector, what tests and the m1 path use"""
+
+    def __init__(self, connector: PaymentConnector) -> None:
+        self.c = connector
+
+    async def submit(self, cmd: CommandRef) -> SubmitResult:
+        return await self.c.create_refund(
+            payment_intent=cmd.provider_payment_id,
+            amount_minor=cmd.amount_minor,
+            currency=cmd.currency,
+            idempotency_key=cmd.idempotency_key,
+            metadata=cmd.metadata,
+        )
+
+    async def refunds_for(self, cmd: CommandRef) -> list[ProviderRefund]:
+        return await self.c.list_refunds(cmd.provider_payment_id)
+
+    async def refund(self, cmd: CommandRef, refund_id: str) -> ProviderRefund | None:
+        return await self.c.get_refund(refund_id)
 
 
 def state_for_refund_status(status: str) -> CommandState:

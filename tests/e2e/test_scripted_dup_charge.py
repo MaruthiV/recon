@@ -6,37 +6,16 @@ import pytest
 from sqlalchemy import func, select, update
 
 from recon_domain.connector import FakeClock
-from recon_domain.plan import ResolutionPlan
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision
-from recon_fixtures.dup_charge import seed_duplicate_charge
+from recon_fixtures.dup_charge import scripted_plan, seed_duplicate_charge
+from recon_provider.http import HttpConnector
 from recon_storage.models import Case, Command, CommandAttempt, Payment, PaymentReservation, RefundClaim
 from recon_verifier.checks import verify_case
-from recon_worker.connector import HttpConnector
 from recon_worker.executor import Executor
 
 T = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
-
-
-def scripted_plan(sd, **kw) -> ResolutionPlan:
-    base = dict(
-        case_id=sd.case_id,
-        case_version=1,
-        recommended_disposition="REFUND",
-        payment_id=sd.duplicate_payment_id,
-        amount_minor=4900,
-        currency="usd",
-        policy_version_ids=[sd.terms_policy_id],
-        evidence_refs=[
-            f"payment:{sd.original_payment_id}:v1",
-            f"payment:{sd.duplicate_payment_id}:v1",
-            f"policy:{sd.terms_policy_id}:dup",
-        ],
-        reason_code="DUPLICATE_CAPTURE",
-        explanation="Two captures of 4900 usd on one order, no refund exists for the second.",
-    )
-    return ResolutionPlan(**{**base, **kw})
 
 
 @pytest.fixture

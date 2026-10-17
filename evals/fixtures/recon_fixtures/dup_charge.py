@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from recon_domain.plan import ResolutionPlan
 from recon_storage.db import new_id
 from recon_storage.models import (
     Case,
@@ -83,11 +84,21 @@ async def seed_duplicate_charge(
     amount_minor: int = 4900,
     split: str = "dev",
     ids: Callable[[str], str] = new_id,
+    webhook_url: str | None = None,
+    webhook_secret: str | None = None,
 ) -> SeededCase:
     tenant_id, account = f"t_{tenant}", f"acct_{tenant}"
     api_key, read_key = f"sk_test_{tenant}", f"rk_test_{tenant}"
     r = await sim.post(
-        "/sim/accounts", json={"id": account, "api_key": api_key, "read_key": read_key}, headers=sim_operator
+        "/sim/accounts",
+        json={
+            "id": account,
+            "api_key": api_key,
+            "read_key": read_key,
+            "webhook_url": webhook_url,
+            "webhook_secret": webhook_secret,
+        },
+        headers=sim_operator,
     )
     r.raise_for_status()
     await sim.post("/sim/clock", json={"freeze_at": now.isoformat()}, headers=sim_operator)
@@ -225,3 +236,24 @@ async def seed_duplicate_charge(
     return SeededCase(
         tenant_id, api_key, read_key, account, case_id, cus, order, pay_a, pay_b, pis[1], pis[0], terms, limits
     )
+
+
+def scripted_plan(sd: SeededCase, **kw) -> ResolutionPlan:
+    # the plan a careful human would write for this fixture, used where no model is involved
+    base = dict(
+        case_id=sd.case_id,
+        case_version=1,
+        recommended_disposition="REFUND",
+        payment_id=sd.duplicate_payment_id,
+        amount_minor=4900,
+        currency="usd",
+        policy_version_ids=[sd.terms_policy_id],
+        evidence_refs=[
+            f"payment:{sd.original_payment_id}:v1",
+            f"payment:{sd.duplicate_payment_id}:v1",
+            f"policy:{sd.terms_policy_id}:dup",
+        ],
+        reason_code="DUPLICATE_CAPTURE",
+        explanation="Two captures of 4900 usd on one order, no refund exists for the second.",
+    )
+    return ResolutionPlan(**{**base, **kw})

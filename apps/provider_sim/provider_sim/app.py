@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -9,13 +10,14 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from . import db
-from .db import accounts, faults, idempotency, payment_intents, refunds, requests_log, sim_state
+from .db import accounts, events, faults, idempotency, payment_intents, refunds, requests_log, sim_state
 
 REFUND_PARAMS = {"payment_intent", "charge", "amount", "reason", "metadata"}
 REASONS = {"duplicate", "fraudulent", "requested_by_customer"}
@@ -96,6 +98,49 @@ def parse_form(body: bytes) -> tuple[dict[str, str], dict[str, str]]:
     return plain, meta
 
 
+def sign(secret: str, t: int, body: bytes) -> str:
+    # stripe scheme: t=<ts>,v1=hex(hmac_sha256(secret, "<ts>.<raw body>"))
+    v1 = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha256).hexdigest()
+    return f"t={t},v1={v1}"
+
+
+async def emit(c: AsyncConnection, account: str, type_: str, refund_row: Any) -> None:
+    t = await db.now(c)
+    evt = _id("evt")
+    payload = {
+        "id": evt,
+        "object": "event",
+        "type": type_,
+        "created": int(t.timestamp()),
+        "data": {"object": refund_obj(refund_row)},
+    }
+    await c.execute(events.insert().values(id=evt, account=account, type=type_, payload=payload))
+
+
+async def settle_due(c: AsyncConnection) -> None:
+    now = await db.now(c)
+    due = (
+        (
+            await c.execute(
+                update(refunds)
+                .where(refunds.c.status == "pending", refunds.c.settle_at <= now)
+                .values(status=refunds.c.settle_to, settle_at=None)
+                .returning(refunds.c.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for rid in due:
+        r = (await c.execute(select(refunds).where(refunds.c.id == rid))).one()
+        if r.status == "failed":
+            await c.execute(
+                update(refunds).where(refunds.c.id == rid).values(failure_reason="expired_or_canceled_card")
+            )
+            r = (await c.execute(select(refunds).where(refunds.c.id == rid))).one()
+        await emit(c, r.account, "refund.updated", r)
+
+
 def fingerprint(path: str, plain: dict[str, str], meta: dict[str, str]) -> str:
     blob = json.dumps({"path": path, "params": plain, "metadata": meta}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -106,6 +151,8 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
     op_token = operator_token or os.environ.get("SIM_OPERATOR_TOKEN", "sim-operator-dev")
     app = FastAPI(title="provider-sim")
     app.state.engine = engine
+    # tests swap this for an in-process transport to recon
+    app.state.webhook_client = httpx.AsyncClient(timeout=10)
 
     async def log(
         c: AsyncConnection,
@@ -210,6 +257,8 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
         if key is not None and not 0 < len(key) <= 255:
             return _error(400, "invalid_request_error", "Invalid idempotency key")
         if await take_fault(account, ("throttle",), key, plain["payment_intent"]):
+            async with engine.begin() as c:
+                await log(c, account, request, key, 429, note="throttled")
             return _error(429, "invalid_request_error", "Too many requests", "rate_limit", should_retry=True)
 
         fp = fingerprint("/v1/refunds", plain, meta)
@@ -289,6 +338,7 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
     ) -> tuple[int, dict, bool]:
         pi_id = plain["payment_intent"]
         fault = await take_fault(account, ("commit_then_500", "fail_500"), key, pi_id)
+        delayed = await take_fault(account, ("pending",), key, pi_id)
         server_error = {"error": {"type": "api_error", "message": "An unknown error occurred."}}
         if fault and fault["kind"] == "fail_500":
             return 500, server_error, True
@@ -363,15 +413,20 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
                         charge=pi.latest_charge,
                         amount=amount,
                         currency=pi.currency,
-                        status="succeeded",
+                        status="pending" if delayed else "succeeded",
                         reason=plain.get("reason") or None,
                         metadata=meta,
                         created=int(t.timestamp()),
                         seq=seq,
+                        settle_at=t + timedelta(seconds=delayed["params"].get("after_seconds", 30))
+                        if delayed
+                        else None,
+                        settle_to=delayed["params"].get("then", "succeeded") if delayed else None,
                     )
                     .returning(*refunds.c)
                 )
             ).one()
+            await emit(c, account, "refund.created", row)
         if fault and fault["kind"] == "commit_then_500":
             # the refund exists, the client just never hears about it
             return 500, server_error, True
@@ -380,6 +435,8 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
     @app.get("/v1/refunds/{refund_id}")
     async def get_refund(refund_id: str, request: Request):
         account = await auth(request)
+        async with engine.begin() as c:
+            await settle_due(c)
         async with engine.connect() as c:
             r = (
                 await c.execute(select(refunds).where(refunds.c.id == refund_id, refunds.c.account == account))
@@ -396,6 +453,8 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
         if await take_fault(account, ("throttle_reads",), None, payment_intent):
             return _error(429, "invalid_request_error", "Too many requests", "rate_limit", should_retry=True)
         limit = max(1, min(limit, 100))
+        async with engine.begin() as c:
+            await settle_due(c)
         q = select(refunds).where(refunds.c.account == account).order_by(refunds.c.seq.desc())
         if payment_intent:
             q = q.where(refunds.c.payment_intent == payment_intent)
@@ -449,7 +508,13 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
         body = await request.json()
         async with engine.begin() as c:
             await c.execute(
-                accounts.insert().values(id=body["id"], api_key=body["api_key"], read_key=body.get("read_key"))
+                accounts.insert().values(
+                    id=body["id"],
+                    api_key=body["api_key"],
+                    read_key=body.get("read_key"),
+                    webhook_url=body.get("webhook_url"),
+                    webhook_secret=body.get("webhook_secret"),
+                )
             )
         return {"id": body["id"]}
 
@@ -500,6 +565,7 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
                 await c.execute(
                     update(sim_state).values(offset_seconds=sim_state.c.offset_seconds + int(b["advance_seconds"]))
                 )
+            await settle_due(c)
             return {"now": (await db.now(c)).isoformat()}
 
     @app.post("/sim/config")
@@ -530,6 +596,43 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
                 )
             ).scalar_one()
         return {"id": fid}
+
+    @app.post("/sim/webhooks/flush")
+    async def flush_webhooks(request: Request):
+        # deliver undelivered events, optionally out of order / twice / with the first one lost
+        operator(request)
+        mode = set((await request.json()).get("mode", []))
+        async with engine.connect() as c:
+            rows = (
+                await c.execute(
+                    select(events, accounts.c.webhook_url, accounts.c.webhook_secret)
+                    .join(accounts, accounts.c.id == events.c.account)
+                    .where(events.c.deliveries == 0)
+                    .order_by(events.c.seq)
+                )
+            ).all()
+            t = int((await db.now(c)).timestamp())
+        plan = list(rows)
+        if "reverse" in mode:
+            plan.reverse()
+        dropped = plan[:1] if "drop_first" in mode else []
+        plan = [r for r in plan if r not in dropped]
+        if "duplicate" in mode:
+            plan = [r for r in plan for _ in range(2)]
+        out = []
+        for r in plan:
+            if not r.webhook_url or not r.webhook_secret:
+                continue
+            body = json.dumps(r.payload, separators=(",", ":")).encode()
+            resp = await app.state.webhook_client.post(
+                r.webhook_url,
+                content=body,
+                headers={"content-type": "application/json", "Stripe-Signature": sign(r.webhook_secret, t, body)},
+            )
+            async with engine.begin() as c:
+                await c.execute(update(events).where(events.c.id == r.id).values(deliveries=events.c.deliveries + 1))
+            out.append({"event": r.id, "type": r.type, "status": resp.status_code})
+        return {"delivered": out, "dropped": [r.id for r in dropped]}
 
     @app.get("/sim/state")
     async def state(request: Request):

@@ -208,7 +208,7 @@ class Run(Base):
     tenant_id: Mapped[str]
     case_id: Mapped[str]
     stage: Mapped[str]
-    status: Mapped[str]
+    investigation: Mapped[str]
     workflow_version: Mapped[str]
     models: Mapped[dict[str, Any]]
     budget: Mapped[dict[str, Any]]
@@ -219,6 +219,13 @@ class Run(Base):
     model_calls: Mapped[int] = mapped_column(Integer, server_default="0")
     tool_calls: Mapped[int] = mapped_column(Integer, server_default="0")
     est_cost_micros: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    plan_id: Mapped[str | None]
+    command_id: Mapped[str | None]
+    owns_command: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    reconcile_rounds: Mapped[int] = mapped_column(Integer, server_default="0")
+    # lease + fence, times are db time so every worker reads one clock
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
     generation: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
@@ -226,6 +233,53 @@ class Run(Base):
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
     )
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str]
+    run_id: Mapped[str]
+    stage: Mapped[str]
+    event_id: Mapped[str] = mapped_column(String, unique=True)
+    available_at: Mapped[datetime] = mapped_column(Ts, server_default=text("now()"))
+    dispatched_at: Mapped[datetime | None]
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    # parked after too many failed deliveries, a human looks at these
+    dead_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(Ts, server_default=text("now()"))
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"]),
+        Index("ix_outbox_due", "available_at", postgresql_where=text("dispatched_at IS NULL")),
+    )
+
+
+class WebhookInbox(Base):
+    __tablename__ = "webhook_inbox"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str]
+    provider: Mapped[str]
+    event_id: Mapped[str]
+    type: Mapped[str]
+    payload_hash: Mapped[str]
+    payload: Mapped[dict[str, Any]]
+    received_at: Mapped[datetime]
+    processed_at: Mapped[datetime | None]
+    outcome: Mapped[str | None]
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "event_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+    )
+
+
+class FaultPoint(Base):
+    # dev-only schedule, read only when RECON_FAULTS=1
+    __tablename__ = "fault_points"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    point: Mapped[str]
+    scope_id: Mapped[str | None]
+    remaining: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
 class ModelUsage(Base):

@@ -18,23 +18,25 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from provider_sim.app import create_app
 from provider_sim.db import ensure_schema as ensure_sim_schema
 from recon_domain.connector import FakeClock
-from recon_mcp.provider import HttpRefundReader
 from recon_mcp.server import create_app as create_mcp_app
+from recon_provider.http import HttpRefundReader
 from recon_storage.bootstrap import bootstrap
 from recon_storage.db import DbNames, admin_url, make_engine, sessions, url
 from recon_verifier.db import ensure_schema as ensure_eval_schema
 
-NAMES = DbNames.for_env("test")
+# live runs use their own dbs so they can't collide with a normal test session
+TEST_ENV = os.environ.get("RECON_TEST_ENV", "test")
+NAMES = DbNames.for_env(TEST_ENV)
 OPERATOR = "test-operator"
 RUN_KEY = b"test-run-token-key"
 MCP_URL = "http://localhost:8200/mcp"
 T = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
-SIM_TABLES = "accounts, payment_intents, refunds, idempotency, faults, requests_log"
+SIM_TABLES = "accounts, payment_intents, refunds, idempotency, faults, requests_log, events"
 
 
 @pytest.fixture(scope="session")
 async def dbs():
-    await bootstrap("test", fresh=True)
+    await bootstrap(TEST_ENV, fresh=True)
     await ensure_sim_schema(url("sim_app", NAMES.sim))
     await ensure_eval_schema(url("recon_eval", NAMES.eval))
     admins = {db: make_engine(admin_url(db)) for db in (NAMES.recon, NAMES.sim, NAMES.eval)}
@@ -125,7 +127,10 @@ class FlakyTransport(httpx.AsyncBaseTransport):
         self.inner = inner
         self.drop_before = 0
         self.lose_after = 0
+        self.give_up_early = 0  # client times out while the provider is still working
+        self.give_up_after = 0.2
         self.posts = 0
+        self.background: list[asyncio.Task] = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/refunds":
@@ -137,6 +142,14 @@ class FlakyTransport(httpx.AsyncBaseTransport):
                 self.lose_after -= 1
                 await self.inner.handle_async_request(request)
                 raise httpx.ReadTimeout("response lost after commit", request=request)
+            if self.give_up_early:
+                self.give_up_early -= 1
+                task = asyncio.create_task(self.inner.handle_async_request(request))
+                self.background.append(task)
+                done, _ = await asyncio.wait({task}, timeout=self.give_up_after)
+                if not done:
+                    raise httpx.ReadTimeout("client gave up, provider still working", request=request)
+                return task.result()
         return await self.inner.handle_async_request(request)
 
 

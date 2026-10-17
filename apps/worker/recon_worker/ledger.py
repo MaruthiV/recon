@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from recon_domain.connector import (
     Clock,
+    CommandRef,
+    DirectGateway,
     PaymentConnector,
+    ProviderGateway,
     ProviderRefund,
     ReadFailed,
     SubmitKind,
@@ -25,6 +28,8 @@ from recon_domain.states import check_command, check_reservation, reservation_fo
 from recon_domain.validation import Decision, Verdict, validate
 from recon_storage.models import Command, CommandAttempt, Payment, PaymentReservation, RefundClaim
 from recon_storage.repos import audit, load_case_facts, new_id
+
+from .faults import NO_FAULTS, Faults
 
 # stripe keeps keys >= 24h, stay well inside that
 SAFE_WINDOW = timedelta(hours=20)
@@ -41,6 +46,20 @@ def provider_metadata(cmd: Command) -> dict[str, str]:
     return {"recon_command_id": cmd.id, "recon_tenant_id": cmd.tenant_id}
 
 
+def command_ref(cmd: Command) -> CommandRef:
+    return CommandRef(
+        id=cmd.id,
+        tenant_id=cmd.tenant_id,
+        provider_payment_id=cmd.provider_payment_id,
+        amount_minor=cmd.amount_minor,
+        currency=cmd.currency,
+        idempotency_key=cmd.idempotency_key,
+        payload_hash=cmd.payload_hash,
+        attempt=cmd.attempts,
+        metadata=provider_metadata(cmd),
+    )
+
+
 class Ledger:
     def __init__(
         self,
@@ -48,11 +67,14 @@ class Ledger:
         clock: Clock,
         connector_for: Callable[[str], PaymentConnector],
         safe_window: timedelta = SAFE_WINDOW,
+        faults: Faults = NO_FAULTS,
+        gateway_for: Callable[[str], ProviderGateway] | None = None,
     ) -> None:
         self.sessions = sessions
         self.clock = clock
-        self.connector_for = connector_for
+        self.gateway_for = gateway_for or (lambda tenant: DirectGateway(connector_for(tenant)))
         self.safe_window = safe_window
+        self.faults = faults
 
     async def _lock(self, s: AsyncSession, model, *where):
         q = select(model).where(*where).with_for_update().execution_options(populate_existing=True)
@@ -72,6 +94,15 @@ class Ledger:
 
     async def prepare(self, tenant_id: str, case_id: str, plan_id: str, plan: ResolutionPlan) -> Prepared:
         now = self.clock.now()
+        async with self.sessions() as s, s.begin():
+            # a redelivered prepare for the same plan: its own reservation would fail validation, so check first
+            mine = (
+                await s.execute(select(Command).where(Command.tenant_id == tenant_id, Command.plan_id == plan_id))
+            ).scalar_one_or_none()
+            if mine is not None:
+                audit(s, tenant_id, "prepare_converged", now, case_id=case_id, command_id=mine.id, plan_id=plan_id)
+                again = Verdict(Decision.AUTHORIZE, ("already prepared for this plan",), mine.entitlement_ref)
+                return Prepared(mine.id, again, converged=True)
         async with self.sessions() as s:
             first = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
         if first.decision is not Decision.AUTHORIZE:
@@ -228,18 +259,12 @@ class Ledger:
                 attempt=attempt_no,
                 resubmit=state is C.UNKNOWN,
             )
-            tenant_id, pi, amount, currency, key = (
-                cmd.tenant_id,
-                cmd.provider_payment_id,
-                cmd.amount_minor,
-                cmd.currency,
-                cmd.idempotency_key,
-            )
-            meta = provider_metadata(cmd)
+            ref = command_ref(cmd)
+        await self.faults.hit("FP3", command_id)
         # no db transaction is open across the provider call
-        result = await self.connector_for(tenant_id).create_refund(
-            payment_intent=pi, amount_minor=amount, currency=currency, idempotency_key=key, metadata=meta
-        )
+        result = await self.gateway_for(ref.tenant_id).submit(ref)
+        await self.faults.hit("FP4", command_id)
+        await self.faults.hit("FP7", command_id)
         return await self._record_submit(command_id, attempt_no, result)
 
     def _target(self, cmd: Command, result: SubmitResult) -> tuple[C, str]:
@@ -253,6 +278,8 @@ class Ledger:
                 return C.CONFIRMED_FAILURE, f"provider rejected: {result.http_status} {result.error_code}"
             case SubmitKind.MISMATCH:
                 return C.MANUAL_REVIEW, "idempotency key reused with different params"
+            case SubmitKind.REFUSED:
+                return C.MANUAL_REVIEW, f"execution boundary refused: {result.error_code}"
             case _:
                 return C.UNKNOWN, f"ambiguous: http {result.http_status or 'no response'}"
 
@@ -347,12 +374,12 @@ class Ledger:
         async with self.sessions() as s:
             cmd = (await s.execute(select(Command).where(Command.id == command_id))).scalar_one()
         state = C(cmd.state)
-        conn = self.connector_for(cmd.tenant_id)
+        gw, ref = self.gateway_for(cmd.tenant_id), command_ref(cmd)
 
         if state is C.PENDING_PROVIDER:
             assert cmd.provider_refund_id is not None
             try:
-                r = await conn.get_refund(cmd.provider_refund_id)
+                r = await gw.refund(ref, cmd.provider_refund_id)
             except ReadFailed:
                 return state
             if r is None:
@@ -365,7 +392,7 @@ class Ledger:
         if state is not C.UNKNOWN:
             return state
         try:
-            refunds = await conn.list_refunds(cmd.provider_payment_id)
+            refunds = await gw.refunds_for(ref)
         except ReadFailed as e:
             # a failed read never means "no refund"
             async with self.sessions() as s, s.begin():
@@ -404,7 +431,7 @@ class Ledger:
         if cmd.provider_refund_id is None:
             return [*problems, "no provider refund bound"]
         try:
-            r = await self.connector_for(cmd.tenant_id).get_refund(cmd.provider_refund_id)
+            r = await self.gateway_for(cmd.tenant_id).refund(command_ref(cmd), cmd.provider_refund_id)
         except ReadFailed as e:
             return [*problems, f"couldn't read provider refund: {e}"]
         if r is None or not self._matches(cmd, r) or r.status != "succeeded":

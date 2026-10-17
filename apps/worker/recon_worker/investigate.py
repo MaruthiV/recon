@@ -14,7 +14,7 @@ from google.adk.tools.mcp_tool import McpToolset, StreamableHTTPConnectionParams
 from google.genai import types
 from pydantic import ValidationError
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from recon_agents.meter import Budget, Pricing, RunMeter, UsageRecord
 from recon_agents.roles import COORDINATOR, INVESTIGATOR, POLICY, ROLE_TOOLS, ROLES
@@ -112,41 +112,46 @@ class Investigator:
                 )
             )
 
-    async def _start(self, tenant_id: str, case_id: str, run_id: str, wf: str, now: datetime) -> dict[str, Any]:
-        async with self.sessions() as s, s.begin():
-            case = await get_case(s, tenant_id, case_id)
-            state = S(case.state)
-            if state is S.OPEN:
-                await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
-            elif state is not S.INVESTIGATING:
-                raise NotInvestigable(f"case {case_id} is {state}")
-            s.add(
-                Run(
-                    id=run_id,
-                    tenant_id=tenant_id,
-                    case_id=case_id,
-                    stage="INVESTIGATE",
-                    status="RUNNING",
-                    workflow_version=wf,
-                    models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in ROLES}},
-                    budget=self.cfg.budget.as_dict(),
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            audit(s, tenant_id, "investigation_started", now, case_id=case_id, run_id=run_id, workflow_version=wf)
-            return {
-                "case_id": case.id,
-                "case_version": case.version,
-                "subject": case.subject,
-                "order_id": case.order_id,
-            }
-
-    async def investigate(self, tenant_id: str, case_id: str) -> Investigation:
-        now = self.clock.now()
-        run_id = new_id("run")
+    async def begin(
+        self, s: AsyncSession, tenant_id: str, case_id: str, run_id: str, now: datetime, stage: str = "INVESTIGATE"
+    ) -> None:
+        case = await get_case(s, tenant_id, case_id)
+        state = S(case.state)
+        if state is S.OPEN:
+            await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
+        elif state is not S.INVESTIGATING:
+            raise NotInvestigable(f"case {case_id} is {state}")
         wf = workflow_version(self.cfg.models)
-        brief = await self._start(tenant_id, case_id, run_id, wf, now)
+        s.add(
+            Run(
+                id=run_id,
+                tenant_id=tenant_id,
+                case_id=case_id,
+                stage=stage,
+                investigation="RUNNING",
+                workflow_version=wf,
+                models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in ROLES}},
+                budget=self.cfg.budget.as_dict(),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await s.flush()
+        audit(s, tenant_id, "investigation_started", now, case_id=case_id, run_id=run_id, workflow_version=wf)
+
+    async def _brief(self, tenant_id: str, case_id: str) -> dict[str, Any]:
+        async with self.sessions() as s:
+            case = await get_case(s, tenant_id, case_id)
+        return {"case_id": case.id, "case_version": case.version, "subject": case.subject, "order_id": case.order_id}
+
+    async def investigate(self, tenant_id: str, case_id: str, run_id: str | None = None) -> Investigation:
+        now = self.clock.now()
+        if run_id is None:
+            run_id = new_id("run")
+            # direct call, no stage machine behind it
+            async with self.sessions() as s, s.begin():
+                await self.begin(s, tenant_id, case_id, run_id, now, stage="DIRECT")
+        brief = await self._brief(tenant_id, case_id)
 
         async def sink(rec: UsageRecord) -> None:
             await self._record_usage(tenant_id, run_id, rec)
@@ -162,6 +167,7 @@ class Investigator:
         outputs: dict[str, Any] = {}
         invocation_id: str | None = None
         status, failure = "SUCCEEDED", None
+        assert run_id is not None
         try:
             async with asyncio.timeout(self.cfg.budget.max_seconds):
                 async for ev in runner.run_async(user_id=tenant_id, session_id=session.id, new_message=msg):
@@ -198,7 +204,7 @@ class Investigator:
                 update(Run)
                 .where(Run.tenant_id == tenant_id, Run.id == run_id)
                 .values(
-                    status=status,
+                    investigation=status,
                     failure=failure,
                     adk_session_id=session.id,
                     adk_invocation_id=invocation_id,

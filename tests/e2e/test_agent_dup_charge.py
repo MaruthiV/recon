@@ -12,9 +12,9 @@ from recon_agents.workflow import workflow_version
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_fixtures.dup_charge import seed_duplicate_charge, seeded_ids
+from recon_provider.http import HttpConnector
 from recon_storage.models import AuditEvent, Command, ModelUsage, Plan, Run
 from recon_verifier.checks import verify_case
-from recon_worker.connector import HttpConnector
 from recon_worker.executor import Executor
 from recon_worker.investigate import AgentConfig, Investigator, resolve_case
 from tests.agents.fakes import (
@@ -88,7 +88,7 @@ async def test_duplicate_charge_agent_path_scripted(aw):
     assert verdict.passed, verdict.failed()
 
     [run] = await aw.rows(Run)
-    assert run.status == "SUCCEEDED" and run.workflow_version == workflow_version(models)
+    assert run.investigation == "SUCCEEDED" and run.workflow_version == workflow_version(models)
     assert run.models["mode"] == "scripted"
     assert run.model_calls == sum(m.calls for m in models.values())  # type: ignore[attr-defined]
     # get_case, list_payments, list_refunds x2, search_policy, compute_refund_quote
@@ -122,7 +122,7 @@ async def test_budget_exhaustion_does_not_fabricate_plan(aw, budget, why):
 
     assert out.case_state is S.ESCALATED and out.command_id is None
     [run] = await aw.rows(Run)
-    assert run.status == "BUDGET_EXHAUSTED" and why in (run.failure or "")
+    assert run.investigation == "BUDGET_EXHAUSTED" and why in (run.failure or "")
     assert await aw.rows(Plan) == []
     assert await aw.rows(Command) == []
     assert await aw.refunds() == []
@@ -137,7 +137,7 @@ async def test_workflow_without_plan_fails_closed(aw, script, why):
 
     assert out.case_state is S.ESCALATED
     [run] = await aw.rows(Run)
-    assert run.status == "FAILED" and why in (run.failure or ""), run.failure
+    assert run.investigation == "FAILED" and why in (run.failure or ""), run.failure
     assert await aw.rows(Plan) == []
     assert await aw.refunds() == []
 
@@ -176,7 +176,7 @@ async def test_plan_without_any_evidence_reads_is_not_accepted(aw):
 
     assert out.case_state is S.ESCALATED
     [run] = await aw.rows(Run)
-    assert (run.status, run.tool_calls) == ("FAILED", 0)
+    assert (run.investigation, run.tool_calls) == ("FAILED", 0)
     assert "without reading any evidence" in (run.failure or "")
     assert await aw.rows(Plan) == []
     assert await aw.refunds() == []
@@ -260,7 +260,7 @@ async def test_duplicate_charge_agent_path(aw):
     out = await aw.resolve(sd, models, mode="live", pricing=pricing)
 
     [run] = await aw.rows(Run)
-    print(f"\nlive run: {run.status} calls={run.model_calls} tools={run.tool_calls} est={run.est_cost_micros}µ$")
+    print(f"\nlive run: {run.investigation} calls={run.model_calls} tools={run.tool_calls} est={run.est_cost_micros}µ$")
     for u in await aw.rows(ModelUsage):
         print(
             f"  {u.agent:22} in={u.prompt_tokens} cached={u.cached_tokens} out={u.output_tokens} "

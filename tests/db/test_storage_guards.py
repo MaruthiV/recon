@@ -6,8 +6,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from recon_domain.connector import FakeClock
 from recon_fixtures.dup_charge import seed_duplicate_charge
+from recon_provider.http import HttpConnector
 from recon_storage.db import make_engine, url
-from recon_worker.connector import HttpConnector
 from recon_worker.executor import Executor
 from tests.conftest import NAMES
 from tests.e2e.test_scripted_dup_charge import scripted_plan

@@ -4,9 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from recon_domain.connector import Clock, PaymentConnector
+from recon_domain.connector import Clock, PaymentConnector, ProviderGateway
 from recon_domain.plan import Disposition, ResolutionPlan, material_hash
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
@@ -14,6 +14,7 @@ from recon_domain.validation import Decision, Verdict, validate
 from recon_storage.models import Plan
 from recon_storage.repos import audit, get_case, load_case_facts, move_case, new_id
 
+from .faults import NO_FAULTS, Faults
 from .ledger import SAFE_WINDOW, Ledger
 
 NO_MONEY_OUTCOME = {
@@ -56,10 +57,12 @@ class Executor:
         connector_for: Callable[[str], PaymentConnector],
         safe_window: timedelta = SAFE_WINDOW,
         max_reconcile_rounds: int = 5,
+        faults: Faults = NO_FAULTS,
+        gateway_for: Callable[[str], ProviderGateway] | None = None,
     ) -> None:
         self.sessions = sessions
         self.clock = clock
-        self.ledger = Ledger(sessions, clock, connector_for, safe_window)
+        self.ledger = Ledger(sessions, clock, connector_for, safe_window, faults, gateway_for)
         self.max_rounds = max_reconcile_rounds
 
     async def _move(self, tenant_id: str, case_id: str, dst: S, resolution: str | None = None, **why) -> S:
@@ -75,32 +78,37 @@ class Executor:
     async def record_plan(
         self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str, run_id: str | None = None
     ) -> tuple[str, Verdict]:
-        now = self.clock.now()
         async with self.sessions() as s, s.begin():
-            case = await get_case(s, tenant_id, case_id)
-            if case.state == S.OPEN.value:
-                await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
-                case.state = S.INVESTIGATING.value
-            await move_case(s, tenant_id, case_id, S(case.state), S.VALIDATING, now)
-            verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
-            plan_id = new_id("plan")
-            s.add(
-                Plan(
-                    id=plan_id,
-                    tenant_id=tenant_id,
-                    case_id=case_id,
-                    case_version=plan.case_version,
-                    run_id=run_id,
-                    source=source,
-                    payload=plan.model_dump(mode="json"),
-                    material_hash=material_hash(plan, verdict.entitlement_ref),
-                    entitlement_ref=verdict.entitlement_ref,
-                    decision=verdict.decision.value,
-                    verdict=verdict_json(verdict),
-                    created_at=now,
-                )
+            return await self.record_plan_in(s, tenant_id, case_id, plan, source, run_id)
+
+    async def record_plan_in(
+        self, s: AsyncSession, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str, run_id: str | None
+    ) -> tuple[str, Verdict]:
+        now = self.clock.now()
+        case = await get_case(s, tenant_id, case_id)
+        if case.state == S.OPEN.value:
+            await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
+            case.state = S.INVESTIGATING.value
+        await move_case(s, tenant_id, case_id, S(case.state), S.VALIDATING, now)
+        verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
+        plan_id = new_id("plan")
+        s.add(
+            Plan(
+                id=plan_id,
+                tenant_id=tenant_id,
+                case_id=case_id,
+                case_version=plan.case_version,
+                run_id=run_id,
+                source=source,
+                payload=plan.model_dump(mode="json"),
+                material_hash=material_hash(plan, verdict.entitlement_ref),
+                entitlement_ref=verdict.entitlement_ref,
+                decision=verdict.decision.value,
+                verdict=verdict_json(verdict),
+                created_at=now,
             )
-            audit(s, tenant_id, "plan_validated", now, case_id=case_id, plan_id=plan_id, **verdict_json(verdict))
+        )
+        audit(s, tenant_id, "plan_validated", now, case_id=case_id, plan_id=plan_id, **verdict_json(verdict))
         return plan_id, verdict
 
     async def _not_executed(self, tenant_id: str, case_id: str, plan: ResolutionPlan, v: Verdict) -> Outcome:

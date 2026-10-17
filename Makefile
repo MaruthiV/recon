@@ -1,4 +1,4 @@
-.PHONY: up down db db-fresh sim test test-fast lint fmt types check
+.PHONY: up down db db-fresh sim demo test test-fast lint fmt types check
 
 up:
 	docker compose up -d --wait db
@@ -18,6 +18,10 @@ db-fresh: up
 
 sim:
 	uv run uvicorn --factory provider_sim.app:create_app --port 8100
+
+# spec §25: kill the worker after the provider commits, recover to one refund (no model calls)
+demo: db
+	uv run recon demo dup-charge --fault FP4
 
 test: up
 	uv run pytest

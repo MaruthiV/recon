@@ -22,10 +22,9 @@ from recon_agents.replay import Tape, replay_models
 from recon_agents.roles import ROLES
 from recon_domain.connector import SystemClock
 from recon_fixtures.dup_charge import seed_duplicate_charge, seeded_ids
-from recon_mcp.provider import HttpRefundReader
 from recon_mcp.server import create_app as create_mcp_app
+from recon_provider.http import HttpConnector, HttpRefundReader
 from recon_storage.db import DbNames, make_engine, new_id, sessions, url
-from recon_worker.connector import HttpConnector
 from recon_worker.executor import Executor
 from recon_worker.investigate import AgentConfig, Investigator, resolve_case
 
@@ -131,6 +130,52 @@ async def investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+async def resume(args: argparse.Namespace) -> int:
+    # re-enqueue one run's current stage and drive it in-process, the sweeper does the same for all runs
+    from sqlalchemy import select, text
+
+    from recon_storage.models import Run
+    from recon_worker.dispatch import Dispatcher
+    from recon_worker.pipeline import Pipeline
+
+    secret, _ = provider_keys(args.tenant)
+    engine = make_engine(url("recon_app", NAMES.recon))
+    db = sessions(engine)
+    clock = SystemClock()
+    try:
+        async with httpx.AsyncClient(base_url=SIM_URL) as sim:
+            conn = HttpConnector(sim, secret)
+            pipe = Pipeline(db, clock, Executor(db, clock, lambda _t: conn), worker_id="cli-resume")
+            async with db() as s, s.begin():
+                run = (await s.execute(select(Run).where(Run.id == args.run))).scalar_one()
+                await s.execute(
+                    text(
+                        "INSERT INTO outbox_events (tenant_id, run_id, stage, event_id, available_at)"
+                        " VALUES (:t, :r, :st, :e, now()) ON CONFLICT (event_id) DO NOTHING"
+                    ),
+                    {
+                        "t": run.tenant_id,
+                        "r": run.id,
+                        "st": run.stage,
+                        "e": f"{run.id}/{run.stage}/{run.generation}/resume",
+                    },
+                )
+
+            async def here(d):
+                return (await pipe.advance(d.run_id, d.stage, d.event_id)).status
+
+            disp = Dispatcher(db, here)
+            for _ in range(20):
+                if await disp.pump_once() == 0:
+                    break
+            async with db() as s:
+                run = (await s.execute(select(Run).where(Run.id == args.run))).scalar_one()
+        print(json.dumps({"run_id": run.id, "stage": run.stage, "lease_owner": run.lease_owner}))
+    finally:
+        await engine.dispose()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="recon")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -144,10 +189,22 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--model", default="gemini-3.8-flash")
     i.add_argument("--pricing", default="2026-10-17")
     i.add_argument("--replay", help="recorded tape, no model calls")
+    r = sub.add_parser("resume", help="re-enqueue a run's current stage and drive it")
+    r.add_argument("--run", required=True)
+    r.add_argument("--tenant", default="t_acme")
+    d = sub.add_parser("demo", help="spec §25 demo, no model calls")
+    d.add_argument("scenario", choices=["dup-charge"])
+    d.add_argument("--fault", choices=["FP4"], default="FP4")
     args = p.parse_args(argv)
     if args.cmd == "seed":
         asyncio.run(seed(args))
         return 0
+    if args.cmd == "resume":
+        return asyncio.run(resume(args))
+    if args.cmd == "demo":
+        from .demo import dup_charge_fp4
+
+        return asyncio.run(dup_charge_fp4(NAMES))
     return asyncio.run(investigate(args))
 
 

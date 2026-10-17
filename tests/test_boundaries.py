@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PKGS = {
     "recon_domain": "packages/domain/recon_domain",
     "recon_storage": "packages/storage/recon_storage",
+    "recon_provider": "packages/provider/recon_provider",
     "provider_sim": "apps/provider_sim/provider_sim",
     "recon_worker": "apps/worker/recon_worker",
     "recon_mcp": "apps/mcp/recon_mcp",
@@ -57,6 +58,17 @@ FORBIDDEN = {
         "fastapi",
     },
     "recon_worker": {"provider_sim", "recon_mcp", "recon_verifier", "recon_fixtures"},
+    # provider clients know http + domain types, nothing about recon's db or apps
+    "recon_provider": {
+        "recon_storage",
+        "recon_worker",
+        "recon_mcp",
+        "recon_agents",
+        "provider_sim",
+        "recon_verifier",
+        "recon_fixtures",
+        "sqlalchemy",
+    },
     # mcp-read can't reach the worker (ledger, write key) or the agents
     "recon_mcp": {"recon_worker", "recon_agents", "provider_sim", "recon_verifier", "recon_fixtures", "google"},
     # agents only see tools, never the db or the money path
