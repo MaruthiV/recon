@@ -69,6 +69,7 @@ def investigator_from_env(db, clock: Clock):
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from recon_agents.meter import Pricing
+    from recon_agents.models import live_model
     from recon_agents.replay import Tape, replay_models
     from recon_agents.roles import ROLES
 
@@ -80,7 +81,7 @@ def investigator_from_env(db, clock: Clock):
         tape = Tape.load(Path(arg))
         models, mode, pricing = replay_models(tape), "replay", Pricing.load(tape.header.get("pricing", "2026-10-17"))
     elif kind == "live" and os.environ.get("RECON_LIVE") == "1":
-        models, mode, pricing = {r: arg for r in ROLES}, "live", Pricing.load("2026-10-17")
+        models, mode, pricing = {r: live_model(arg) for r in ROLES}, "live", Pricing.load("2026-10-17")
     else:
         raise RuntimeError("RECON_AGENT=live needs RECON_LIVE=1, or use replay:<tape>")
     adk = create_async_engine(

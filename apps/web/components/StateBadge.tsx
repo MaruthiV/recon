@@ -1,4 +1,9 @@
 const TONE: Record<string, string> = {
+  AUTHORIZE: "ok",
+  NEEDS_APPROVAL: "warn",
+  STALE: "warn",
+  REJECT: "bad",
+  ESCALATE: "bad",
   CLOSED: "ok",
   CONFIRMED_SUCCESS: "ok",
   ESCALATED: "bad",

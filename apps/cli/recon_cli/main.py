@@ -18,6 +18,7 @@ from google.adk.sessions import DatabaseSessionService
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from recon_agents.meter import Pricing
+from recon_agents.models import live_model
 from recon_agents.replay import Tape, replay_models
 from recon_agents.roles import ROLES
 from recon_domain.connector import SystemClock
@@ -75,7 +76,7 @@ async def investigate(args: argparse.Namespace) -> int:
         models, mode = replay_models(tape), "replay"
         pricing = Pricing.load(tape.header.get("pricing", args.pricing))
     elif live_allowed():
-        models, mode, pricing = {r: str(args.model) for r in ROLES}, "live", Pricing.load(args.pricing)
+        models, mode, pricing = {r: live_model(args.model) for r in ROLES}, "live", Pricing.load(args.pricing)
     else:
         print("refusing: live model calls need RECON_LIVE=1, GEMINI_API_KEY and a spend go (or pass --replay)")
         return 2

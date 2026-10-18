@@ -56,7 +56,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-markers = ["live: calls a real model, needs RECON_LIVE=1 and a spend go"]
+markers = [
+    "live: calls a real model, needs RECON_LIVE=1 and a spend go",
+    "local: calls a local ollama model, needs RECON_LOCAL=1",
+]
 addopts = "-p no:cacheprovider"
 # adk's own noise, not ours
 filterwarnings = [

@@ -1,0 +1,8 @@
+{
+  "snapshot": "local",
+  "source": "local inference through ollama on the dev machine, no per-token charge (electricity not counted)",
+  "unit": "micro-usd per 1M tokens",
+  "models": {
+    "ollama:llama3.2": {"input": 0, "output": 0}
+  }
+}

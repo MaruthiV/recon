@@ -245,8 +245,11 @@ async def test_duplicate_charge_agent_path_recorded(aw, path):
     if path is None:
         pytest.skip("no recorded gemini tape yet, it comes from a live run")
     tape = Tape.load(path)
+    models = replay_models(tape)
+    # a tape is a recording of these exact prompts and schemas, a changed prompt means re-record it
+    assert workflow_version(models) == tape.header["workflow_version"], f"{path.name} is stale, re-record it"
     sd = await aw.seed()
-    out = await aw.resolve(sd, replay_models(tape), mode="replay", pricing=Pricing.load(tape.header["pricing"]))
+    out = await aw.resolve(sd, models, mode="replay", pricing=Pricing.load(tape.header["pricing"]))
     assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED")
     assert len(await aw.refunds()) == 1
     assert (await aw.verify(sd)).passed
@@ -256,17 +259,19 @@ async def test_duplicate_charge_agent_path_recorded(aw, path):
 async def test_duplicate_charge_agent_path(aw):
     if os.environ.get("RECON_LIVE") != "1" or not os.environ.get("GEMINI_API_KEY"):
         pytest.skip("live: needs RECON_LIVE=1, GEMINI_API_KEY and a spend go")
-    from google.adk.models import Gemini
+    from recon_agents.models import live_model
 
     model = os.environ.get("RECON_MODEL", "gemini-3.8-flash")
     pricing = Pricing.load("2026-10-17")
     tape = Tape(
         {"models": {r: model for r in ROLES}, "seed": SEED, "clock": T.isoformat(), "pricing": pricing.snapshot}
     )
-    models = {r: RecordingLlm(model=model, inner=Gemini(model=model), agent=r, tape=tape) for r in ROLES}
+    models = {r: RecordingLlm(model=model, inner=live_model(model), agent=r, tape=tape) for r in ROLES}
     tape.header["workflow_version"] = workflow_version(models)
     sd = await aw.seed()
-    out = await aw.resolve(sd, models, mode="live", pricing=pricing)
+    # free tier: per-minute 429 waits and slow thinking aren't processing time, so allow more wall clock
+    budget = Budget(max_seconds=int(os.environ.get("RECON_BUDGET_SECONDS", "300")))
+    out = await aw.resolve(sd, models, mode="live", pricing=pricing, budget=budget)
 
     [run] = await aw.rows(Run)
     print(f"\nlive run: {run.investigation} calls={run.model_calls} tools={run.tool_calls} est={run.est_cost_micros}µ$")
@@ -300,3 +305,31 @@ async def test_fp11_mcp_read_drops_are_retried_or_escalated_never_guessed(aw, dr
         # the read service stays down: no evidence, no plan, no money
         assert out.case_state is S.ESCALATED
         assert await aw.rows(Plan) == [] and refunds == []
+
+
+@pytest.mark.local
+async def test_duplicate_charge_agent_path_local(aw):
+    if os.environ.get("RECON_LOCAL") != "1":
+        pytest.skip("local: needs RECON_LOCAL=1 and an ollama server")
+    from recon_agents.ollama import OllamaLlm
+
+    model = "ollama:" + os.environ.get("RECON_LOCAL_MODEL", "llama3.2")
+    pricing = Pricing.load("local")
+    tape = Tape(
+        {"models": {r: model for r in ROLES}, "seed": SEED, "clock": T.isoformat(), "pricing": pricing.snapshot}
+    )
+    models = {r: RecordingLlm(model=model, inner=OllamaLlm(model=model), agent=r, tape=tape) for r in ROLES}
+    tape.header["workflow_version"] = workflow_version(models)
+    sd = await aw.seed()
+    budget = Budget(max_seconds=int(os.environ.get("RECON_BUDGET_SECONDS", "900")))
+    out = await aw.resolve(sd, models, mode="local", pricing=pricing, budget=budget)
+
+    [run] = await aw.rows(Run)
+    print(f"\nlocal run: {run.investigation} calls={run.model_calls} tools={run.tool_calls} failure={run.failure}")
+    for u in await aw.rows(ModelUsage):
+        print(f"  {u.agent:22} in={u.prompt_tokens} out={u.output_tokens} {u.latency_ms}ms")
+    print(f"  plan: {[p.payload for p in await aw.rows(Plan)]}")
+    tape.save(Path(os.environ.get("RECON_TAPE_OUT", "results/tapes")) / f"{run.id}.jsonl")
+    assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED"), (run.failure, out.problems)
+    assert len(await aw.refunds()) == 1
+    assert (await aw.verify(sd)).passed

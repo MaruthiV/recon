@@ -343,8 +343,11 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                         yield ": keepalive\n\n"
                 await asyncio.sleep(0.5)
 
+        # no-transform: proxies (next's rewrite included) would otherwise gzip and buffer the stream
         return StreamingResponse(
-            gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @app.post("/v1/cases/{case_id}/investigations", status_code=202)

@@ -127,9 +127,9 @@ export default function Workspace() {
                       {paymentRef.get(p.id)} <div className="muted"><code>{p.id}</code></div>
                     </td>
                     <td className="muted">{when(p.captured_at)}</td>
-                    <td>{money(p.amount_minor, p.currency)}</td>
-                    <td>{money(p.refunded_minor, p.currency)}</td>
-                    <td>{money(p.reserved_minor, p.currency)}</td>
+                    <td className="num">{money(p.amount_minor, p.currency)}</td>
+                    <td className="num">{money(p.refunded_minor, p.currency)}</td>
+                    <td className="num">{money(p.reserved_minor, p.currency)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -189,7 +189,7 @@ export default function Workspace() {
                       <td>
                         <StateBadge state={cmd.state} />
                       </td>
-                      <td>{money(cmd.amount_minor, cmd.currency)}</td>
+                      <td className="num">{money(cmd.amount_minor, cmd.currency)}</td>
                       <td>{cmd.provider_refund_id ? <code>{cmd.provider_refund_id}</code> : "–"}</td>
                       <td>{cmd.attempts}</td>
                     </tr>

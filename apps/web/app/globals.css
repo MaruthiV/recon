@@ -29,6 +29,8 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; font-size: 12px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+td.num { white-space: nowrap; }
+td code { word-break: break-all; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--line); }
 .badge.ok { background: #dcfce7; color: var(--ok); }
 .badge.warn { background: #fef3c7; color: var(--warn); }

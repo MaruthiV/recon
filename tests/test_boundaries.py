@@ -91,7 +91,6 @@ FORBIDDEN = {
         "recon_verifier",
         "recon_fixtures",
         "sqlalchemy",
-        "httpx",
     },
 }
 
@@ -111,3 +110,23 @@ def imports(pkg_dir: Path) -> set[str]:
 def test_import_boundaries(pkg):
     bad = imports(ROOT / PKGS[pkg]) & FORBIDDEN[pkg]
     assert not bad, f"{pkg} imports {bad}"
+
+
+def test_only_the_model_client_in_agents_speaks_http():
+    # agents reach data through mcp tools only, the one http client talks to a local model server
+    talkers = sorted(
+        f.name
+        for f in (ROOT / PKGS["recon_agents"]).rglob("*.py")
+        if {"httpx", "httpx2", "requests", "urllib"} & imports_of_file(f)
+    )
+    assert talkers == ["ollama.py"], talkers
+
+
+def imports_of_file(f: Path) -> set[str]:
+    out = set()
+    for node in ast.walk(ast.parse(f.read_text())):
+        if isinstance(node, ast.Import):
+            out |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            out.add(node.module.split(".")[0])
+    return out
