@@ -73,6 +73,65 @@ class Order(Base):
     )
 
 
+class OrderLine(Base):
+    __tablename__ = "order_lines"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    order_id: Mapped[str]
+    sku: Mapped[str]
+    description: Mapped[str]
+    kind: Mapped[str] = mapped_column(String, server_default="item")  # item | shipping
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str]
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id", "order_id"], ["orders.tenant_id", "orders.id"]),
+        CheckConstraint("quantity > 0 AND unit_minor >= 0", name="positive"),
+    )
+
+
+class Return(Base):
+    __tablename__ = "returns"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    order_id: Mapped[str]
+    line_id: Mapped[str]
+    quantity: Mapped[int] = mapped_column(Integer)
+    requested_at: Mapped[datetime]
+    # null until the warehouse has it, an unreceived return isn't refundable yet
+    received_at: Mapped[datetime | None]
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(["tenant_id", "order_id"], ["orders.tenant_id", "orders.id"]),
+        ForeignKeyConstraint(["tenant_id", "line_id"], ["order_lines.tenant_id", "order_lines.id"]),
+        CheckConstraint("quantity > 0", name="positive"),
+    )
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    customer_id: Mapped[str]
+    order_id: Mapped[str]
+    plan_name: Mapped[str]
+    period_start: Mapped[datetime]
+    period_end: Mapped[datetime]
+    price_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str]
+    cancelled_at: Mapped[datetime | None]
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("tenant_id", "order_id"),
+        ForeignKeyConstraint(["tenant_id", "order_id"], ["orders.tenant_id", "orders.id"]),
+        ForeignKeyConstraint(["tenant_id", "customer_id"], ["customers.tenant_id", "customers.id"]),
+        CheckConstraint("period_end > period_start AND price_minor > 0", name="valid_period"),
+    )
+
+
 class Payment(Base):
     __tablename__ = "payments"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -143,6 +202,9 @@ class PolicyRule(Base):
     refund_window_days: Mapped[int | None]
     duplicate_refund_allowed: Mapped[bool | None]
     rounding_mode: Mapped[str | None]
+    returns_allowed: Mapped[bool | None]
+    shipping_refundable: Mapped[bool | None]
+    proration_allowed: Mapped[bool | None]
     auto_approve_limit_minor: Mapped[int | None] = mapped_column(BigInteger)
     __table_args__ = (
         UniqueConstraint("policy_document_id"),
@@ -321,6 +383,32 @@ class Plan(Base):
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
         ForeignKeyConstraint(["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"]),
+    )
+
+
+class Approval(Base):
+    __tablename__ = "approvals"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str]
+    case_id: Mapped[str]
+    plan_id: Mapped[str]
+    # what was approved, all of it, so a changed plan or amount can't ride on an old yes
+    plan_hash: Mapped[str]
+    payment_id: Mapped[str | None]
+    entitlement_ref: Mapped[str | None]
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    currency: Mapped[str | None]
+    approver: Mapped[str]
+    role: Mapped[str]
+    decision: Mapped[str]  # APPROVED | REJECTED
+    expires_at: Mapped[datetime]
+    created_at: Mapped[datetime]
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        # several per plan is fine (an expired yes, then a fresh one), prepare uses the newest
+        Index("ix_approvals_plan", "tenant_id", "plan_id", "created_at"),
+        ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
+        ForeignKeyConstraint(["tenant_id", "plan_id"], ["plans.tenant_id", "plans.id"]),
     )
 
 

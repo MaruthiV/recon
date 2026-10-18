@@ -35,6 +35,9 @@ class RefundTerms:
     refund_window_days: int
     duplicate_refund_allowed: bool
     rounding: Rounding
+    returns_allowed: bool = False
+    shipping_refundable: bool = False
+    proration_allowed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

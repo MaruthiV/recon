@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from recon_domain.approvals import ApprovalFact, executable
 from recon_domain.connector import (
     Clock,
     CommandRef,
@@ -92,7 +93,9 @@ class Ledger:
         cmd = await self._lock(s, Command, Command.id == command_id)
         return cmd, pay, claim
 
-    async def prepare(self, tenant_id: str, case_id: str, plan_id: str, plan: ResolutionPlan) -> Prepared:
+    async def prepare(
+        self, tenant_id: str, case_id: str, plan_id: str, plan: ResolutionPlan, approval: ApprovalFact | None = None
+    ) -> Prepared:
         now = self.clock.now()
         async with self.sessions() as s, s.begin():
             # a redelivered prepare for the same plan: its own reservation would fail validation, so check first
@@ -105,7 +108,7 @@ class Ledger:
                 return Prepared(mine.id, again, converged=True)
         async with self.sessions() as s:
             first = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
-        if first.decision is not Decision.AUTHORIZE:
+        if not executable(first, plan, approval, now):
             return Prepared(None, first)
         assert first.payment and first.entitlement_ref and first.amount and first.permitted_minor is not None
         ref = first.entitlement_ref
@@ -151,7 +154,7 @@ class Ledger:
 
             # decide for real on facts read under the locks
             verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
-            if verdict.decision is not Decision.AUTHORIZE or verdict.entitlement_ref != ref:
+            if not executable(verdict, plan, approval, now) or verdict.entitlement_ref != ref:
                 audit(
                     s,
                     tenant_id,

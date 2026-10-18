@@ -244,7 +244,8 @@ async def seed_duplicate_charge(
             "amount_minor": amount_minor,
             "currency": "usd",
         },
-        "requires_approval": False,
+        # the fixture's own copy of the 100.00 auto-approve limit it seeds
+        "requires_approval": amount_minor > 10_000,
         "expects_information": False,
         "case_payment_intents": pis,
     }

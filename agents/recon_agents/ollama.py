@@ -76,6 +76,8 @@ class OllamaLlm(BaseLlm):
     base_url: str = os.environ.get("RECON_OLLAMA_URL", "http://127.0.0.1:11434")
     num_ctx: int = 16384
     timeout_s: int = 600
+    # thinking models (qwen3) reason before answering, slow on a laptop, so off unless asked for
+    think: bool = os.environ.get("RECON_LOCAL_THINK") == "1"
 
     async def generate_content_async(
         self, llm_request: LlmRequest, stream: bool = False
@@ -85,6 +87,7 @@ class OllamaLlm(BaseLlm):
             "messages": messages_of(llm_request),
             "tools": tools_of(llm_request),
             "stream": False,
+            "think": self.think,
             # deterministic enough to compare runs, and room for the ~9k token prompts
             "options": {"temperature": 0, "seed": 7, "num_ctx": self.num_ctx},
         }

@@ -34,6 +34,7 @@ export type Plan = {
   id: string;
   source: string;
   decision: string;
+  material_hash: string;
   payload: {
     recommended_disposition: string;
     payment_id: string | null;

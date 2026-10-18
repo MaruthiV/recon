@@ -7,12 +7,12 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from recon_domain.connector import Clock, PaymentConnector, ProviderGateway
-from recon_domain.plan import Disposition, ResolutionPlan, material_hash
+from recon_domain.plan import MONEY_DISPOSITIONS, Disposition, ResolutionPlan, material_hash
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision, Verdict, validate
 from recon_storage.models import Plan
-from recon_storage.repos import audit, get_case, load_case_facts, move_case, new_id
+from recon_storage.repos import NotFound, audit, get_case, load_case_facts, move_case, new_id
 
 from .faults import NO_FAULTS, Faults
 from .ledger import SAFE_WINDOW, Ledger
@@ -90,7 +90,15 @@ class Executor:
             await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
             case.state = S.INVESTIGATING.value
         await move_case(s, tenant_id, case_id, S(case.state), S.VALIDATING, now)
-        verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
+        try:
+            verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
+        except NotFound:
+            # no order yet: asking for one is fine, moving money isn't
+            verdict = (
+                Verdict(Decision.REJECT, ("case has no order",))
+                if plan.recommended_disposition in MONEY_DISPOSITIONS
+                else Verdict(Decision.NO_MONEY, (f"{plan.recommended_disposition} moves no money",))
+            )
         plan_id = new_id("plan")
         s.add(
             Plan(

@@ -8,12 +8,13 @@ export default function Login() {
   const router = useRouter();
   const [user, setUser] = useState("maruthi");
   const [tenant, setTenant] = useState("t_acme");
+  const [role, setRole] = useState<"operator" | "supervisor">("operator");
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     try {
-      await api("/v1/login", { method: "POST", body: JSON.stringify({ user, tenant_id: tenant }) });
+      await api("/v1/login", { method: "POST", body: JSON.stringify({ user, tenant_id: tenant, role }) });
       router.push("/");
     } catch (err) {
       setError(String(err));
@@ -32,6 +33,13 @@ export default function Login() {
         <label>
           Tenant
           <input value={tenant} onChange={(e) => setTenant(e.target.value)} />
+        </label>
+        <label>
+          Role
+          <select value={role} onChange={(e) => setRole(e.target.value as "operator" | "supervisor")}>
+            <option value="operator">operator</option>
+            <option value="supervisor">supervisor (can approve refunds)</option>
+          </select>
         </label>
         <button className="primary" type="submit">
           Sign in

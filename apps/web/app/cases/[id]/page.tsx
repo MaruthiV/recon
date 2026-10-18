@@ -6,7 +6,7 @@ import { StateBadge } from "@/components/StateBadge";
 import { Timeline } from "@/components/Timeline";
 import { api, type CaseDetail, micros, money, NotSignedIn, when } from "@/lib/api";
 
-type Me = { user: string; tenant_id: string; dev: boolean; faults: boolean };
+type Me = { user: string; tenant_id: string; role: string; dev: boolean; faults: boolean };
 
 export default function Workspace() {
   const { id } = useParams<{ id: string }>();
@@ -39,6 +39,24 @@ export default function Workspace() {
     try {
       await api(`/v1/cases/${id}/investigations`, { method: "POST", body: JSON.stringify({ mode }) });
       setNote(`Started a ${mode} investigation.`);
+      load();
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decide(decision: "APPROVED" | "REJECTED") {
+    if (!d?.plan) return;
+    setBusy(true);
+    try {
+      // the hash of the plan on screen, a plan that changed since gets refused
+      await api(`/v1/plans/${d.plan.id}/approvals`, {
+        method: "POST",
+        body: JSON.stringify({ decision, plan_hash: d.plan.material_hash }),
+      });
+      setNote(decision === "APPROVED" ? "Approved this exact plan." : "Rejected, no money will move.");
       load();
     } catch (e) {
       setNote(String(e));
@@ -154,6 +172,22 @@ export default function Workspace() {
                   Validator: <StateBadge state={plan.decision} />{" "}
                   <span className="muted">{plan.verdict.reasons.join("; ")}</span>
                 </p>
+                {c.state === "AWAITING_APPROVAL" && plan.decision === "NEEDS_APPROVAL" && (
+                  <div className="row">
+                    {me?.role === "supervisor" ? (
+                      <>
+                        <button className="primary" disabled={busy} onClick={() => decide("APPROVED")}>
+                          Approve this refund
+                        </button>
+                        <button disabled={busy} onClick={() => decide("REJECTED")}>
+                          Reject
+                        </button>
+                      </>
+                    ) : (
+                      <span className="muted">Waiting for a supervisor to approve.</span>
+                    )}
+                  </div>
+                )}
                 <p className="muted">Evidence cited</p>
                 <ul>
                   {plan.payload.evidence_refs.map((r) => (

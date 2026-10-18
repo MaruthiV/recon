@@ -11,13 +11,12 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from recon_domain.connector import Clock, SystemClock
-from recon_domain.rules import rules_plan
 from recon_domain.tokens import BadToken, mint, verify
 from recon_storage.db import make_engine, sessions, url
 from recon_storage.models import Case, CaseMessage, Command, Order, Payment, Plan, Run, Tenant
-from recon_storage.repos import load_case_facts
 from recon_worker.executor import Executor
 from recon_worker.pipeline import NotStartable, Pipeline
+from recon_worker.rules_planner import plan_by_rules
 
 COOKIE = "recon_session"
 AUDIENCE = "recon-api"
@@ -48,6 +47,12 @@ LABELS = {
 class Login(BaseModel):
     user: str
     tenant_id: str
+    role: Literal["operator", "supervisor"] = "operator"
+
+
+class Decide(BaseModel):
+    decision: Literal["APPROVED", "REJECTED"]
+    plan_hash: str
 
 
 class Start(BaseModel):
@@ -112,12 +117,13 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                 "aud": AUDIENCE,
                 "user": body.user,
                 "tenant": body.tenant_id,
+                "role": body.role,
                 "exp": int((now + timedelta(hours=8)).timestamp()),
             },
             session_key,
         )
         response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=8 * 3600)
-        return {"user": body.user, "tenant_id": body.tenant_id}
+        return {"user": body.user, "tenant_id": body.tenant_id, "role": body.role}
 
     @app.post("/v1/logout")
     async def logout(response: Response):
@@ -126,7 +132,13 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
 
     @app.get("/v1/me")
     async def me(claims: Claims):
-        return {"user": claims["user"], "tenant_id": claims["tenant"], "dev": dev, "faults": faults_enabled}
+        return {
+            "user": claims["user"],
+            "tenant_id": claims["tenant"],
+            "role": claims.get("role", "operator"),
+            "dev": dev,
+            "faults": faults_enabled,
+        }
 
     @app.get("/v1/cases")
     async def list_cases(tenant: TenantId, state: str | None = None):
@@ -251,6 +263,7 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                 "id": plan.id,
                 "source": plan.source,
                 "decision": plan.decision,
+                "material_hash": plan.material_hash,
                 "payload": plan.payload,
                 "verdict": plan.verdict,
                 "created_at": iso(plan.created_at),
@@ -360,11 +373,24 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                 run_id = await pipeline.start_agent(tenant, case_id)
             else:
                 async with db() as s:
-                    facts = await load_case_facts(s, tenant, case_id, clock.now())
-                run_id = await pipeline.start_scripted(tenant, case_id, rules_plan(facts), source="rules")
+                    plan = await plan_by_rules(s, tenant, case_id, clock.now())
+                run_id = await pipeline.start_scripted(tenant, case_id, plan, source="rules")
         except NotStartable as e:
             raise HTTPException(409, str(e)) from e
         return {"run_id": run_id, "mode": body.mode}
+
+    @app.post("/v1/plans/{plan_id}/approvals", status_code=202)
+    async def decide(plan_id: str, body: Decide, claims: Claims):
+        # the client sends the hash of the plan it showed, a plan that changed since can't be approved by accident
+        if claims.get("role") != "supervisor":
+            raise HTTPException(403, "only a supervisor can approve refunds")
+        try:
+            run_id = await pipeline.approve(
+                claims["tenant"], plan_id, body.plan_hash, claims["user"], claims["role"], body.decision
+            )
+        except NotStartable as e:
+            raise HTTPException(404 if "no such plan" in str(e) else 409, str(e)) from e
+        return {"decision": body.decision, "run_id": run_id}
 
     @app.post("/internal/demo/faults")
     async def arm(body: Arm, _: TenantId):

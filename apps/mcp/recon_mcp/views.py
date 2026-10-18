@@ -45,6 +45,34 @@ class CaseView(BaseModel):
     messages: list[MessageView]
 
 
+class LineView(BaseModel):
+    line_id: str
+    sku: str
+    description: str
+    kind: str
+    quantity: int
+    unit_minor: int
+
+
+class ReturnView(BaseModel):
+    return_id: str
+    ref: str
+    line_id: str
+    quantity: int
+    requested_at: datetime
+    received_at: datetime | None
+
+
+class SubscriptionView(BaseModel):
+    subscription_id: str
+    ref: str
+    plan_name: str
+    period_start: datetime
+    period_end: datetime
+    price_minor: int
+    cancelled_at: datetime | None
+
+
 class OrderView(BaseModel):
     order_id: str
     version: int
@@ -52,6 +80,9 @@ class OrderView(BaseModel):
     total_minor: int
     currency: str
     placed_at: datetime
+    lines: list[LineView] = []
+    returns: list[ReturnView] = []
+    subscription: SubscriptionView | None = None
 
 
 class PaymentView(BaseModel):

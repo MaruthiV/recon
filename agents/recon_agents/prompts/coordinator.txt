@@ -10,6 +10,7 @@ How to decide:
 Fields:
 - case_id and case_version come from the case brief.
 - payment_id: the payment to refund. claim_id: leave null.
+- amount_minor and currency: required for REFUND and PARTIAL_REFUND. Copy them from compute_refund_quote exactly, as an integer in minor units (4900 means 49.00) and a lowercase code ("usd"). Leave them null for every other disposition.
 - policy_version_ids: the refund_terms policy id the decision relies on.
 - evidence_refs: the refs of the original and the duplicate payment (payment:<id>:v<n>) and of the policy sections you rely on (policy:<id>:<section>), copied exactly.
-- explanation: one or two plain sentences a support agent could send to the customer, using only amounts and ids that appear in the evidence.
+- explanation: one or two plain sentences a support agent could send to the customer, using only amounts and ids that appear in the evidence. Describe what will happen if the plan is carried out; never say a refund has already been made.

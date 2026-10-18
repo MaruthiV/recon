@@ -16,11 +16,21 @@ from recon_domain.policy import AuthorityClass, PolicyVersion
 from recon_domain.tokens import MCP_READ, RUN_TOKEN_HEADER, BadToken, verify
 from recon_domain.validation import quote
 from recon_storage.db import make_engine, new_id, sessions
-from recon_storage.models import Case, CaseMessage, Order, Payment, PolicyDocument
+from recon_storage.models import (
+    Case,
+    CaseMessage,
+    Order,
+    OrderLine,
+    Payment,
+    PolicyDocument,
+    Return,
+    Subscription,
+)
 from recon_storage.repos import NotFound, load_case_facts
 
 from .views import (
     CaseView,
+    LineView,
     MessageView,
     OrderView,
     PaymentList,
@@ -31,7 +41,9 @@ from .views import (
     RefundList,
     RefundView,
     Result,
+    ReturnView,
     Status,
+    SubscriptionView,
     ToolError,
 )
 
@@ -239,6 +251,33 @@ def create_app(
                     Order.tenant_id == call.tenant_id, Order.id == order_id, Order.customer_id == case.customer_id
                 )
                 order = (await s.execute(q)).scalar_one_or_none()
+            lines, rets, sub = [], [], None
+            if order is not None:
+                lines = list(
+                    (
+                        await s.execute(
+                            select(OrderLine).where(
+                                OrderLine.tenant_id == call.tenant_id, OrderLine.order_id == order.id
+                            )
+                        )
+                    ).scalars()
+                )
+                rets = list(
+                    (
+                        await s.execute(
+                            select(Return)
+                            .where(Return.tenant_id == call.tenant_id, Return.order_id == order.id)
+                            .order_by(Return.requested_at)
+                        )
+                    ).scalars()
+                )
+                sub = (
+                    await s.execute(
+                        select(Subscription).where(
+                            Subscription.tenant_id == call.tenant_id, Subscription.order_id == order.id
+                        )
+                    )
+                ).scalar_one_or_none()
         if order is None:
             return call.none(f"no order {order_id} for this customer")
         view = OrderView(
@@ -248,6 +287,38 @@ def create_app(
             total_minor=order.total_minor,
             currency=order.currency,
             placed_at=order.placed_at,
+            lines=[
+                LineView(
+                    line_id=li.id,
+                    sku=li.sku,
+                    description=li.description,
+                    kind=li.kind,
+                    quantity=li.quantity,
+                    unit_minor=li.unit_minor,
+                )
+                for li in lines
+            ],
+            returns=[
+                ReturnView(
+                    return_id=r.id,
+                    ref=f"return:{r.id}:v{r.version}",
+                    line_id=r.line_id,
+                    quantity=r.quantity,
+                    requested_at=r.requested_at,
+                    received_at=r.received_at,
+                )
+                for r in rets
+            ],
+            subscription=sub
+            and SubscriptionView(
+                subscription_id=sub.id,
+                ref=f"subscription:{sub.id}:v{sub.version}",
+                plan_name=sub.plan_name,
+                period_start=sub.period_start,
+                period_end=sub.period_end,
+                price_minor=sub.price_minor,
+                cancelled_at=sub.cancelled_at,
+            ),
         )
         return call.found(view, [f"order:{order.id}"], f"v{order.version}")
 
@@ -429,11 +500,14 @@ def create_app(
     @server.tool(
         description=(
             "Deterministic refund arithmetic for one payment under the applicable policy. "
+            "For returns or cancellations pass subject_id (the return_id or subscription_id). "
             "Returns the most that may be refunded now, or why nothing can be."
         ),
         annotations=READ_ONLY,
     )
-    async def compute_refund_quote(payment_id: str, reason_code: ReasonCode, ctx: Context) -> Result[QuoteView]:
+    async def compute_refund_quote(
+        payment_id: str, reason_code: ReasonCode, ctx: Context, subject_id: str | None = None
+    ) -> Result[QuoteView]:
         call, denied = begin(ctx, "compute_refund_quote")
         if denied:
             return denied
@@ -442,7 +516,7 @@ def create_app(
                 facts = await load_case_facts(s, call.tenant_id, call.case_id, call.observed_at)
             except NotFound:
                 return call.none("case not found")
-        q = quote(facts, payment_id, reason_code)
+        q = quote(facts, payment_id, reason_code, subject_id)
         view = QuoteView(
             payment_id=payment_id,
             eligible=q.eligible,

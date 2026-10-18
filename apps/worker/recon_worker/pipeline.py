@@ -10,13 +10,14 @@ from enum import StrEnum
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from recon_domain.approvals import ApprovalFact
 from recon_domain.connector import Clock
 from recon_domain.plan import ResolutionPlan
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision, Verdict
-from recon_storage.models import Command, OutboxEvent, Plan, Run
-from recon_storage.repos import audit, get_case, move_case, new_id
+from recon_storage.models import Approval, Command, OutboxEvent, Plan, Run
+from recon_storage.repos import NotFound, audit, get_case, move_case, new_id
 
 from .executor import Executor
 from .faults import NO_FAULTS, Faults
@@ -166,6 +167,114 @@ class Pipeline:
             self._enqueue(s, tenant_id, run_id, Stage.PREPARE, 0)
         return run_id
 
+    async def approve(
+        self,
+        tenant_id: str,
+        plan_id: str,
+        plan_hash: str,
+        approver: str,
+        role: str,
+        decision: str,
+        ttl: timedelta = timedelta(hours=24),
+    ) -> str | None:
+        """record a supervisor's decision on the exact plan they saw, a yes queues a fresh run at PREPARE"""
+        now = self.clock.now()
+        async with self.sessions() as s, s.begin():
+            row = (
+                await s.execute(select(Plan).where(Plan.tenant_id == tenant_id, Plan.id == plan_id))
+            ).scalar_one_or_none()
+            if row is None:
+                raise NotStartable("no such plan")
+            case = await get_case(s, tenant_id, row.case_id)
+            latest = (
+                await s.execute(
+                    select(Plan.id)
+                    .where(Plan.tenant_id == tenant_id, Plan.case_id == row.case_id)
+                    .order_by(Plan.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            if (
+                case.state != S.AWAITING_APPROVAL.value
+                or row.decision != Decision.NEEDS_APPROVAL.value
+                or latest != plan_id
+            ):
+                raise NotStartable(f"case is {case.state}, plan {plan_id} isn't the one awaiting approval")
+            if plan_hash != row.material_hash:
+                raise NotStartable("the plan changed since you looked at it")
+            v = row.verdict
+            s.add(
+                Approval(
+                    id=new_id("apr"),
+                    tenant_id=tenant_id,
+                    case_id=row.case_id,
+                    plan_id=plan_id,
+                    plan_hash=row.material_hash,
+                    payment_id=v.get("payment_id"),
+                    entitlement_ref=v.get("entitlement_ref"),
+                    amount_minor=v.get("amount_minor"),
+                    currency=row.payload.get("currency"),
+                    approver=approver,
+                    role=role,
+                    decision=decision,
+                    expires_at=now + ttl,
+                    created_at=now,
+                )
+            )
+            audit(
+                s,
+                tenant_id,
+                "plan_approval",
+                now,
+                case_id=row.case_id,
+                plan_id=plan_id,
+                decision=decision,
+                approver=approver,
+            )
+            try:
+                if decision != "APPROVED":
+                    await move_case(s, tenant_id, row.case_id, S.AWAITING_APPROVAL, S.CLOSED, now, "DENIED")
+                    return None
+                await move_case(s, tenant_id, row.case_id, S.AWAITING_APPROVAL, S.VALIDATING, now)
+            except NotFound as e:
+                # another supervisor decided a moment ago, this transaction (and its approval row) rolls back
+                raise NotStartable("someone else just decided this case") from e
+            run_id = new_id("run")
+            s.add(
+                Run(
+                    id=run_id,
+                    tenant_id=tenant_id,
+                    case_id=row.case_id,
+                    stage=Stage.PREPARE.value,
+                    investigation="APPROVED",
+                    workflow_version="approval",
+                    models={"mode": "approval"},
+                    budget={},
+                    plan_id=plan_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await s.flush()
+            self._enqueue(s, tenant_id, run_id, Stage.PREPARE, 0)
+            return run_id
+
+    async def _approval(self, tenant_id: str, plan_id: str) -> ApprovalFact | None:
+        async with self.sessions() as s:
+            a = (
+                await s.execute(
+                    select(Approval)
+                    .where(Approval.tenant_id == tenant_id, Approval.plan_id == plan_id)
+                    .order_by(Approval.created_at.desc(), Approval.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if a is None:
+            return None
+        return ApprovalFact(
+            a.plan_hash, a.payment_id, a.entitlement_ref, a.amount_minor, a.currency, a.decision, a.expires_at
+        )
+
     async def _claim(self, run_id: str, stage: Stage) -> Claim | Advanced:
         async with self.sessions() as s, s.begin():
             row = (
@@ -312,11 +421,15 @@ class Pipeline:
         async with self.sessions() as s:
             row = (await s.execute(select(Plan).where(Plan.id == claim.plan_id))).scalar_one()
         plan = ResolutionPlan.model_validate(row.payload)
-        if row.decision != Decision.AUTHORIZE.value:
+        approval = None
+        if row.decision == Decision.NEEDS_APPROVAL.value:
+            approval = await self._approval(claim.tenant_id, row.id)
+        if row.decision != Decision.AUTHORIZE.value and approval is None:
             verdict = Verdict(Decision(row.decision), tuple(row.verdict.get("reasons", ())))
             await self.executor._not_executed(claim.tenant_id, claim.case_id, plan, verdict)
             return Step(Stage.DONE)
-        prepared = await self.ledger.prepare(claim.tenant_id, claim.case_id, row.id, plan)
+        # prepare re-validates on fresh facts and only takes the approval if it still covers this exact plan
+        prepared = await self.ledger.prepare(claim.tenant_id, claim.case_id, row.id, plan, approval)
         if prepared.command_id is None:
             await self.executor._not_executed(claim.tenant_id, claim.case_id, plan, prepared.verdict)
             return Step(Stage.DONE)

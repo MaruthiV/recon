@@ -10,10 +10,21 @@ from recon_domain.money import Currency, Money
 from recon_domain.policy import AuthorityClass, OperationalLimits, PolicyVersion, RefundTerms
 from recon_domain.proration import Rounding
 from recon_domain.states import CaseState, check_case
-from recon_domain.validation import CaseFacts, ClaimFact, PaymentFact
+from recon_domain.validation import CaseFacts, ClaimFact, LineFact, PaymentFact, ReturnFact, SubscriptionFact
 
 from .db import new_id
-from .models import AuditEvent, Case, Order, Payment, PolicyDocument, PolicyRule, RefundClaim
+from .models import (
+    AuditEvent,
+    Case,
+    Order,
+    OrderLine,
+    Payment,
+    PolicyDocument,
+    PolicyRule,
+    RefundClaim,
+    Return,
+    Subscription,
+)
 
 
 class NotFound(LookupError):
@@ -90,10 +101,29 @@ async def load_case_facts(s: AsyncSession, tenant_id: str, case_id: str, now: da
                     rule.refund_window_days or 0,
                     bool(rule.duplicate_refund_allowed),
                     Rounding(rule.rounding_mode or "HALF_EVEN"),
+                    returns_allowed=bool(rule.returns_allowed),
+                    shipping_refundable=bool(rule.shipping_refundable),
+                    proration_allowed=bool(rule.proration_allowed),
                 )
             )
         elif pv.authority_class is AuthorityClass.OPERATIONAL_LIMITS:
             limits.append(OperationalLimits(pv, rule.auto_approve_limit_minor or 0))
+
+    lines = (
+        await s.execute(select(OrderLine).where(OrderLine.tenant_id == tenant_id, OrderLine.order_id == order.id))
+    ).scalars()
+    rets = (
+        await s.execute(
+            select(Return)
+            .where(Return.tenant_id == tenant_id, Return.order_id == order.id)
+            .order_by(Return.requested_at)
+        )
+    ).scalars()
+    sub = (
+        await s.execute(
+            select(Subscription).where(Subscription.tenant_id == tenant_id, Subscription.order_id == order.id)
+        )
+    ).scalar_one_or_none()
 
     return CaseFacts(
         tenant_id=tenant_id,
@@ -111,6 +141,23 @@ async def load_case_facts(s: AsyncSession, tenant_id: str, case_id: str, now: da
         refund_terms=tuple(terms),
         limits=tuple(limits),
         now=now,
+        lines=tuple(
+            LineFact(li.id, li.order_id, li.sku, li.kind, li.quantity, Money(li.unit_minor, Currency(li.currency)))
+            for li in lines
+        ),
+        returns=tuple(
+            ReturnFact(r.id, r.order_id, r.line_id, r.quantity, r.requested_at, r.received_at, r.version) for r in rets
+        ),
+        subscription=sub
+        and SubscriptionFact(
+            sub.id,
+            sub.order_id,
+            sub.period_start,
+            sub.period_end,
+            Money(sub.price_minor, Currency(sub.currency)),
+            sub.cancelled_at,
+            sub.version,
+        ),
     )
 
 

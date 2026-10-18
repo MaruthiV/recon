@@ -184,7 +184,7 @@ def test_quote_is_exactly_what_validate_allows(name):
     [
         (facts(), "pay_a", ReasonCode.DUPLICATE_CAPTURE, "no earlier matching capture"),
         (facts(), "pay_zz", ReasonCode.DUPLICATE_CAPTURE, "isn't on this case's order"),
-        (facts(), "pay_b", ReasonCode.RETURNED_ITEMS, "isn't automated"),
+        (facts(), "pay_b", ReasonCode.RETURNED_ITEMS, "doesn't refund returns"),
         (facts(now=T0 + timedelta(days=31)), "pay_b", ReasonCode.DUPLICATE_CAPTURE, "refund window"),
         (
             facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))),
@@ -212,10 +212,10 @@ def test_rules_plan_refunds_the_duplicate_and_passes_validation():
 @pytest.mark.parametrize(
     ("f", "disposition"),
     [
-        (facts(payments=(pay("pay_a", 0),)), "ESCALATE"),
+        (facts(payments=(pay("pay_a", 0),)), "REQUEST_INFORMATION"),
         (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))), "ALREADY_REFUNDED"),
         (facts(now=T0 + timedelta(days=40)), "DENY"),
-        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, amount=5000))), "ESCALATE"),
+        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, amount=5000))), "DENY"),
     ],
 )
 def test_rules_plan_moves_no_money_when_it_shouldnt(f, disposition):
@@ -224,3 +224,133 @@ def test_rules_plan_moves_no_money_when_it_shouldnt(f, disposition):
     p = rules_plan(f)
     assert p.recommended_disposition == disposition
     assert validate(p, f).decision is not Decision.AUTHORIZE
+
+
+# --- returns and proration (m4) ---
+
+from recon_domain.validation import LineFact, ReturnFact, SubscriptionFact  # noqa: E402
+
+FULL_TERMS = RefundTerms(
+    policy("pol_terms_v1", AuthorityClass.REFUND_TERMS),
+    30,
+    True,
+    Rounding.HALF_EVEN,
+    returns_allowed=True,
+    shipping_refundable=False,
+    proration_allowed=True,
+)
+LINES = (
+    LineFact("line_a", "ord_1", "SKU-A", "item", 2, Money(2500, Currency.USD)),
+    LineFact("line_s", "ord_1", "SHIP", "shipping", 1, Money(500, Currency.USD)),
+)
+
+
+def ret(rid="ret_1", line="line_a", qty=1, received=True, version=1):
+    return ReturnFact(
+        rid, "ord_1", line, qty, T0 + timedelta(days=1), T0 + timedelta(days=3) if received else None, version
+    )
+
+
+def return_facts(*returns, terms=FULL_TERMS):
+    return facts(
+        payments=(pay("pay_a", 0, amount=5500),), lines=LINES, returns=returns or (ret(),), refund_terms=(terms,)
+    )
+
+
+def return_plan(amount, rid="ret_1", **kw):
+    base = dict(
+        payment_id="pay_a",
+        amount_minor=amount,
+        reason_code="RETURNED_ITEMS",
+        evidence_refs=["payment:pay_a:v1", f"return:{rid}:v1", "policy:pol_terms_v1:returns"],
+    )
+    return plan(**{**base, **kw})
+
+
+def test_return_refunds_exactly_the_returned_units():
+    f = return_facts()
+    q = quote(f, "pay_a", ReasonCode.RETURNED_ITEMS)
+    assert q.eligible and q.amount == Money(2500, Currency.USD) and q.entitlement_ref == "return:ord_1:ret_1"
+    assert validate(return_plan(2500), f).decision is Decision.AUTHORIZE
+    assert validate(return_plan(2501), f).decision is Decision.REJECT
+
+
+@pytest.mark.parametrize(
+    ("f", "why"),
+    [
+        (return_facts(ret(received=False)), "hasn't been received"),
+        (return_facts(ret(line="line_s")), "shipping isn't refundable"),
+        (return_facts(terms=replace(FULL_TERMS, returns_allowed=False)), "doesn't refund returns"),
+    ],
+)
+def test_returns_that_arent_refundable(f, why):
+    q = quote(f, "pay_a", ReasonCode.RETURNED_ITEMS)
+    assert not q.eligible and why in q.reasons[0]
+    v = validate(return_plan(500 if "shipping" in why else 2500), f)
+    assert v.decision is Decision.REJECT and why in v.reasons[0]
+
+
+def test_the_cited_return_is_the_one_refunded():
+    f = return_facts(ret("ret_1", qty=1), ret("ret_2", qty=2))
+    assert "several returns" in quote(f, "pay_a", ReasonCode.RETURNED_ITEMS).reasons[0]
+    assert quote(f, "pay_a", ReasonCode.RETURNED_ITEMS, "ret_2").amount == Money(5000, Currency.USD)
+    assert validate(return_plan(5000, "ret_2"), f).decision is Decision.AUTHORIZE
+    # the 2-unit amount on the 1-unit return is over its entitlement
+    assert validate(return_plan(5000, "ret_1"), f).decision is Decision.REJECT
+
+
+def sub(price=3000, days=30, cancel_after=timedelta(days=10, hours=12), cancelled=True):
+    start = T0
+    return SubscriptionFact(
+        "sub_1",
+        "ord_1",
+        start,
+        start + timedelta(days=days),
+        Money(price, Currency.USD),
+        start + cancel_after if cancelled else None,
+        1,
+    )
+
+
+def prorate_facts(s=None, terms=FULL_TERMS):
+    return facts(payments=(pay("pay_a", 0, amount=3000),), subscription=s or sub(), refund_terms=(terms,))
+
+
+def prorate_plan(amount, **kw):
+    base = dict(
+        payment_id="pay_a",
+        amount_minor=amount,
+        reason_code="PRORATED_CANCELLATION",
+        evidence_refs=["payment:pay_a:v1", "subscription:sub_1:v1", "policy:pol_terms_v1:proration"],
+    )
+    return plan(**{**base, **kw})
+
+
+def test_proration_counts_started_days_as_used():
+    # 10.5 days in: 11 used, 19 of 30 unused, 3000 * 19/30 = 1900 exactly
+    f = prorate_facts()
+    q = quote(f, "pay_a", ReasonCode.PRORATED_CANCELLATION)
+    assert q.amount == Money(1900, Currency.USD) and (q.entitlement_ref or "").startswith("prorate:sub_1:")
+    assert validate(prorate_plan(1900), f).decision is Decision.AUTHORIZE
+    assert validate(prorate_plan(1901), f).decision is Decision.REJECT
+
+
+@pytest.mark.parametrize(("mode", "expected"), [("HALF_EVEN", 633), ("UP", 634), ("DOWN", 633)])
+def test_proration_uses_the_policy_rounding(mode, expected):
+    # 1000 * 19/30 = 633.33...
+    f = prorate_facts(sub(price=1000), replace(FULL_TERMS, rounding=Rounding(mode)))
+    assert quote(f, "pay_a", ReasonCode.PRORATED_CANCELLATION).amount == Money(expected, Currency.USD)
+
+
+@pytest.mark.parametrize(
+    ("f", "why"),
+    [
+        (prorate_facts(sub(cancelled=False)), "no cancelled subscription"),
+        (prorate_facts(sub(cancel_after=timedelta(days=31))), "outside the paid period"),
+        (prorate_facts(terms=replace(FULL_TERMS, proration_allowed=False)), "doesn't prorate"),
+    ],
+)
+def test_proration_that_isnt_owed(f, why):
+    q = quote(f, "pay_a", ReasonCode.PRORATED_CANCELLATION)
+    assert not q.eligible and why in q.reasons[0]
+    assert validate(prorate_plan(100), f).decision is Decision.REJECT

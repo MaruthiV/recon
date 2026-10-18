@@ -47,8 +47,13 @@ async def verify_case(recon: AsyncEngine, sim: AsyncEngine, evals: AsyncEngine, 
     cmds = await _rows(recon, "SELECT * FROM commands WHERE case_id = :id ORDER BY op_seq", id=case_id)
     done = [c for c in cmds if c["state"] == "CONFIRMED_SUCCESS"]
     pis = label["case_payment_intents"]
+    # refunds that existed before the ticket (support issued them, say) aren't this case's effect
     sim_refunds = await _rows(
-        sim, "SELECT * FROM refunds WHERE payment_intent = ANY(:pis) AND status = ANY(:live)", pis=pis, live=list(LIVE)
+        sim,
+        "SELECT * FROM refunds WHERE payment_intent = ANY(:pis) AND status = ANY(:live) AND NOT (id = ANY(:pre))",
+        pis=pis,
+        live=list(LIVE),
+        pre=list(label.get("preexisting_refunds", [])),
     )
 
     # 1. right tenant/customer/order, and the right payment and claim if money moved
@@ -66,10 +71,15 @@ async def verify_case(recon: AsyncEngine, sim: AsyncEngine, evals: AsyncEngine, 
         Check("1_identity", same and target_ok, f"commands={[(c['payment_id'], c['state']) for c in cmds]}")
     )
 
-    # 2. disposition
-    want = label["resolution"]
+    # 2. disposition, and where the case should have ended up
+    want, want_state = label["resolution"], label.get("case_state")
+    state_ok = want_state is None or case["state"] == want_state
     v.checks.append(
-        Check("2_disposition", case["resolution"] == want, f"case resolution {case['resolution']}, want {want}")
+        Check(
+            "2_disposition",
+            case["resolution"] == want and state_ok,
+            f"case {case['state']}/{case['resolution']}, want {want_state}/{want}",
+        )
     )
 
     # 3. amount and currency
@@ -133,7 +143,21 @@ async def verify_case(recon: AsyncEngine, sim: AsyncEngine, evals: AsyncEngine, 
 
     # 6. approval / information handling
     if label.get("requires_approval"):
-        v.checks.append(Check("6_approval_info", False, "approval binding not implemented yet (m4)"))
+        ok, why = False, "no confirmed command"
+        if fin and len(done) == 1:
+            cmd = done[0]
+            apr = await _rows(
+                recon, "SELECT * FROM approvals WHERE plan_id = :p AND decision = 'APPROVED'", p=cmd["plan_id"]
+            )
+            ok = any(
+                a["amount_minor"] == cmd["amount_minor"]
+                and a["payment_id"] == cmd["payment_id"]
+                and a["entitlement_ref"] == cmd["entitlement_ref"]
+                and a["created_at"] <= cmd["created_at"] < a["expires_at"]
+                for a in apr
+            )
+            why = f"approvals on the executed plan: {[(a['amount_minor'], a['decision']) for a in apr]}"
+        v.checks.append(Check("6_approval_info", ok, why))
     elif label.get("expects_information"):
         v.checks.append(Check("6_approval_info", case["state"] == "AWAITING_INFO" and not sim_refunds, case["state"]))
     else:

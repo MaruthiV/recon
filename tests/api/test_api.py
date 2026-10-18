@@ -38,8 +38,8 @@ async def _adv(w, d):
     return (await w.advance(d.run_id, d.stage, d.event_id)).status
 
 
-async def login(c, tenant="t_acme"):
-    r = await c.post("/v1/login", json={"user": "maruthi", "tenant_id": tenant})
+async def login(c, tenant="t_acme", role="operator"):
+    r = await c.post("/v1/login", json={"user": "maruthi", "tenant_id": tenant, "role": role})
     assert r.status_code == 200
 
 
@@ -110,3 +110,38 @@ async def test_login_and_fault_controls_are_dev_only(app_sessions, clock, api):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=quiet), base_url="http://api") as c:
         await login(c)
         assert (await c.post("/internal/demo/faults", json={"point": "FP4"})).status_code == 404
+
+
+async def test_only_a_supervisor_approves_and_only_the_plan_they_saw(
+    app_sessions, flaky_sim, op, verifier_engines, clock
+):
+    from recon_fixtures.dup_charge import scripted_plan
+
+    sd = await seed_duplicate_charge(
+        app_sessions, flaky_sim, op, verifier_engines["eval"], T, tenant="hooli", amount_minor=25_000
+    )
+    app = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=False)
+    conn = HttpConnector(flaky_sim, sd.api_key)
+    worker = Pipeline(app_sessions, clock, Executor(app_sessions, clock, lambda _t: conn), worker_id="w")
+    await worker.start_scripted(sd.tenant_id, sd.case_id, scripted_plan(sd, amount_minor=25_000))
+    disp = Dispatcher(app_sessions, lambda d: _adv(worker, d))
+    for _ in range(10):
+        await disp.pump_once()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api") as c:
+        await login(c, sd.tenant_id)
+        plan = (await c.get(f"/v1/cases/{sd.case_id}")).json()["plan"]
+        assert plan["decision"] == "NEEDS_APPROVAL"
+        body = {"decision": "APPROVED", "plan_hash": plan["material_hash"]}
+        assert (await c.post(f"/v1/plans/{plan['id']}/approvals", json=body)).status_code == 403
+        await login(c, sd.tenant_id, role="supervisor")
+        stale = {"decision": "APPROVED", "plan_hash": "0" * 64}
+        assert (await c.post(f"/v1/plans/{plan['id']}/approvals", json=stale)).status_code == 409
+        assert (await c.post("/v1/plans/plan_nope/approvals", json=body)).status_code == 404
+        assert (await c.post(f"/v1/plans/{plan['id']}/approvals", json=body)).status_code == 202
+    for _ in range(10):
+        await disp.pump_once()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api") as c:
+        await login(c, sd.tenant_id)
+        case = (await c.get(f"/v1/cases/{sd.case_id}")).json()["case"]
+    assert (case["state"], case["resolution"]) == ("CLOSED", "REFUNDED")
