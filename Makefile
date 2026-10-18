@@ -1,4 +1,4 @@
-.PHONY: up down db db-fresh sim demo test test-fast lint fmt types check
+.PHONY: up down db db-fresh sim demo dev web-install web-check test test-fast lint fmt types check
 
 up:
 	docker compose up -d --wait db
@@ -18,6 +18,17 @@ db-fresh: up
 
 sim:
 	uv run uvicorn --factory provider_sim.app:create_app --port 8100
+
+# local stack for the ui: sim, mcp-read, mcp-exec, worker (restarts when killed), api, web
+dev: db
+	uv run recon dev
+
+web-install:
+	pnpm --dir apps/web install
+
+web-check:
+	pnpm --dir apps/web typecheck
+	pnpm --dir apps/web build
 
 # spec §25: kill the worker after the provider commits, recover to one refund (no model calls)
 demo: db

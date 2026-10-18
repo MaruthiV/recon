@@ -187,13 +187,21 @@ class McpRead:
         self.sim = sim_client
         self.read_keys: dict[str, str] = {}
         self.service: Any = None
+        self.drop_next = 0  # fp11: mcp-read answers 503 this many times
+
+    async def flaky(self, scope, receive, send):
+        if scope["type"] == "http" and self.drop_next > 0:
+            self.drop_next -= 1
+            await send({"type": "http.response.start", "status": 503, "headers": []})
+            return await send({"type": "http.response.body", "body": b"mcp-read unavailable"})
+        await self.service(scope, receive, send)
 
     def reader_for(self, tenant_id: str) -> HttpRefundReader:
         return HttpRefundReader(self.sim, self.read_keys[tenant_id])
 
     def http_factory(self, headers=None, timeout=None, auth=None):
         return httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=self.service),
+            transport=httpx2.ASGITransport(app=self.flaky),
             headers=headers,
             timeout=timeout,
             auth=auth,

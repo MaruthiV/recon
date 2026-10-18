@@ -24,8 +24,10 @@ def results(req: LlmRequest) -> list[tuple[str, dict[str, Any]]]:
     for c in req.contents:
         for p in c.parts or []:
             fr = p.function_response
-            if fr is not None and fr.name != "set_model_response":
-                out.append((fr.name or "", (fr.response or {}).get("structuredContent") or {}))
+            # a tool error carries no envelope, act like it never answered and ask again
+            env = (fr.response or {}).get("structuredContent") if fr is not None else None
+            if fr is not None and fr.name != "set_model_response" and env:
+                out.append((fr.name or "", env))
     return out
 
 

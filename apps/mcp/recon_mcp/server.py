@@ -457,3 +457,27 @@ def create_app(
 
     inner = server.streamable_http_app(stateless_http=True, json_response=True, host=host)
     return ReadService(inner, engine, key, clock)
+
+
+def create_read_from_env() -> ReadService:
+    import json
+    import os
+    from datetime import datetime
+
+    import httpx
+
+    from recon_domain.connector import FakeClock
+    from recon_provider.http import HttpRefundReader
+    from recon_storage.db import url
+
+    keys = json.loads(os.environ.get("RECON_PROVIDER_KEYS", "{}"))
+    provider = httpx.AsyncClient(base_url=os.environ.get("RECON_SIM_URL", "http://localhost:8100"))
+    readers = {t: HttpRefundReader(provider, k["read"]) for t, k in keys.items() if k.get("read")}
+    fixed = os.environ.get("RECON_NOW")
+    return create_app(
+        os.environ.get("RECON_MCP_DATABASE_URL") or url("recon_mcp_read", "recon"),
+        os.environ.get("RECON_RUN_TOKEN_KEY", "dev-run-token-key").encode(),
+        readers.__getitem__,
+        FakeClock(datetime.fromisoformat(fixed)) if fixed else SystemClock(),
+        os.environ.get("RECON_MCP_HOST", "127.0.0.1"),
+    )

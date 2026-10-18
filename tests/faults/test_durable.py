@@ -3,13 +3,13 @@ from itertools import count
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_fixtures.dup_charge import seed_duplicate_charge
 from recon_provider.http import HttpConnector
-from recon_storage.models import AuditEvent, Case, Command, CommandAttempt, OutboxEvent, Run
+from recon_storage.models import AuditEvent, Case, Command, CommandAttempt, OutboxEvent, Payment, Run
 from recon_verifier.checks import verify_case
 from recon_worker.dispatch import Dispatcher, Sweeper
 from recon_worker.executor import Executor
@@ -318,3 +318,22 @@ async def test_an_event_that_never_succeeds_is_parked_not_retried_forever(pw, ap
     [evt] = await pw.rows(OutboxEvent)
     assert evt.dead_at is not None and "dead after 3 attempts" in (evt.last_error or "")
     assert await Sweeper(app_sessions).sweep_once() == 0  # and the sweeper doesn't resurrect it
+
+
+async def test_fp10_balance_taken_before_the_locks_is_refused_under_them(pw, app_sessions):
+    async def someone_else_reserves(point):
+        async with app_sessions() as s, s.begin():
+            await s.execute(update(Payment).where(Payment.id == pw.sd.duplicate_payment_id).values(reserved_minor=4900))
+
+    w = pw.worker(Faults(app_sessions, enabled=True, on_hit=lambda p: None, before_hit=someone_else_reserves))
+    await pw.arm("FP10")
+    await w.start_scripted(pw.sd.tenant_id, pw.sd.case_id, scripted_plan(pw.sd))
+    await pw.drain(pw.dispatcher(w))
+
+    assert (await pw.case_state())[0] is S.ESCALATED
+    assert await pw.rows(Command) == []
+    assert await pw.refunds() == []
+    [refused] = await pw.rows(AuditEvent, AuditEvent.kind == "prepare_refused")
+    assert refused.data["decision"] == "REJECT"
+    [pay] = await pw.rows(Payment, Payment.id == pw.sd.duplicate_payment_id)
+    assert pay.reserved_minor == 4900  # only the other command's hold, ours never landed

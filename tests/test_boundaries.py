@@ -11,6 +11,7 @@ PKGS = {
     "provider_sim": "apps/provider_sim/provider_sim",
     "recon_worker": "apps/worker/recon_worker",
     "recon_mcp": "apps/mcp/recon_mcp",
+    "recon_api": "apps/api/recon_api",
     "recon_agents": "agents/recon_agents",
     "recon_verifier": "evals/verifier/recon_verifier",
     "recon_fixtures": "evals/fixtures/recon_fixtures",
@@ -68,6 +69,16 @@ FORBIDDEN = {
         "recon_verifier",
         "recon_fixtures",
         "sqlalchemy",
+    },
+    # the api starts work and reads state, it never talks to the provider, the agents or the graders
+    "recon_api": {
+        "provider_sim",
+        "recon_verifier",
+        "recon_fixtures",
+        "recon_mcp",
+        "recon_agents",
+        "recon_provider",
+        "httpx",
     },
     # mcp-read can't reach the worker (ledger, write key) or the agents
     "recon_mcp": {"recon_worker", "recon_agents", "provider_sim", "recon_verifier", "recon_fixtures", "google"},

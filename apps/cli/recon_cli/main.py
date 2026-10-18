@@ -192,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("resume", help="re-enqueue a run's current stage and drive it")
     r.add_argument("--run", required=True)
     r.add_argument("--tenant", default="t_acme")
+    v = sub.add_parser("dev", help="local stack: sim, mcp-read, mcp-exec, worker (auto-restart), api, web")
+    v.add_argument("--agent", help="live:<model> (needs RECON_LIVE=1) or replay:<tape>")
+    v.add_argument("--no-web", action="store_true")
     d = sub.add_parser("demo", help="spec §25 demo, no model calls")
     d.add_argument("scenario", choices=["dup-charge"])
     d.add_argument("--fault", choices=["FP4"], default="FP4")
@@ -201,6 +204,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "resume":
         return asyncio.run(resume(args))
+    if args.cmd == "dev":
+        from .dev import dev
+
+        try:
+            return asyncio.run(dev(NAMES, args.agent, not args.no_web))
+        except KeyboardInterrupt:
+            return 0
     if args.cmd == "demo":
         from .demo import dup_charge_fp4
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from recon_domain.plan import ResolutionPlan
@@ -117,8 +118,11 @@ async def seed_duplicate_charge(
     pay_a, pay_b = ids("pay"), ids("pay")
     terms, limits, case_id = ids("pol"), ids("pol"), ids("case")
     async with sessions() as s, s.begin():
-        s.add(Tenant(id=tenant_id, name=tenant.title(), provider_account=account, created_at=placed))
-        await s.flush()
+        # a tenant seeded before keeps its policies, so the dev stack can add one demo case per start
+        known = (await s.execute(select(Tenant.id).where(Tenant.id == tenant_id))).scalar() is not None
+        if not known:
+            s.add(Tenant(id=tenant_id, name=tenant.title(), provider_account=account, created_at=placed))
+            await s.flush()
         s.add(Customer(id=cus, tenant_id=tenant_id, email=f"jo@{tenant}.example", name="Jo Rivera"))
         await s.flush()
         s.add(
@@ -150,6 +154,20 @@ async def seed_duplicate_charge(
             (terms, "refund_terms", "Refund terms", TERMS_SECTIONS),
             (limits, "operational_limits", "Operational limits", LIMITS_SECTIONS),
         )
+        if known:
+            terms, limits = [
+                (
+                    await s.execute(
+                        select(PolicyDocument.id).where(
+                            PolicyDocument.tenant_id == tenant_id,
+                            PolicyDocument.authority_class == cls,
+                            PolicyDocument.version == 1,
+                        )
+                    )
+                ).scalar_one()
+                for cls in ("refund_terms", "operational_limits")
+            ]
+            docs = ()
         for pid, cls, title, sections in docs:
             body = body_of(sections)
             s.add(
@@ -178,19 +196,22 @@ async def seed_duplicate_charge(
                         text=text,
                     )
                 )
-        s.add(
-            PolicyRule(
-                id=ids("rule"),
-                tenant_id=tenant_id,
-                policy_document_id=terms,
-                refund_window_days=30,
-                duplicate_refund_allowed=True,
-                rounding_mode="HALF_EVEN",
+        if not known:
+            s.add(
+                PolicyRule(
+                    id=ids("rule"),
+                    tenant_id=tenant_id,
+                    policy_document_id=terms,
+                    refund_window_days=30,
+                    duplicate_refund_allowed=True,
+                    rounding_mode="HALF_EVEN",
+                )
             )
-        )
-        s.add(
-            PolicyRule(id=ids("rule"), tenant_id=tenant_id, policy_document_id=limits, auto_approve_limit_minor=10_000)
-        )
+            s.add(
+                PolicyRule(
+                    id=ids("rule"), tenant_id=tenant_id, policy_document_id=limits, auto_approve_limit_minor=10_000
+                )
+            )
         s.add(
             Case(
                 id=case_id,

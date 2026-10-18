@@ -109,6 +109,8 @@ class Ledger:
             return Prepared(None, first)
         assert first.payment and first.entitlement_ref and first.amount and first.permitted_minor is not None
         ref = first.entitlement_ref
+        # fp10: the gap where someone else can spend the balance before we lock
+        await self.faults.hit("FP10", plan_id)
 
         async with self.sessions() as s, s.begin():
             pay = await self._lock(s, Payment, Payment.tenant_id == tenant_id, Payment.id == first.payment.id)

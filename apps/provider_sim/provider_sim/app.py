@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from . import db
@@ -508,13 +509,15 @@ def create_app(dsn: str | None = None, operator_token: str | None = None) -> Fas
         body = await request.json()
         async with engine.begin() as c:
             await c.execute(
-                accounts.insert().values(
+                pg_insert(accounts)
+                .values(
                     id=body["id"],
                     api_key=body["api_key"],
                     read_key=body.get("read_key"),
                     webhook_url=body.get("webhook_url"),
                     webhook_secret=body.get("webhook_secret"),
                 )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
         return {"id": body["id"]}
 

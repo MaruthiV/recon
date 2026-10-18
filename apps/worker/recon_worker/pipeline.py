@@ -16,7 +16,7 @@ from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision, Verdict
 from recon_storage.models import Command, OutboxEvent, Plan, Run
-from recon_storage.repos import audit, new_id
+from recon_storage.repos import audit, get_case, move_case, new_id
 
 from .executor import Executor
 from .faults import NO_FAULTS, Faults
@@ -36,6 +36,10 @@ UNRESOLVED = (C.UNKNOWN, C.PENDING_PROVIDER, C.SUBMITTING)
 
 
 class StaleLease(Exception):
+    pass
+
+
+class NotStartable(Exception):
     pass
 
 
@@ -111,14 +115,34 @@ class Pipeline:
         )
 
     async def start_agent(self, tenant_id: str, case_id: str) -> str:
-        assert self.investigator is not None, "no investigator configured"
+        # just queue it, the worker that runs INVESTIGATE stamps its own workflow version and models
+        now = self.clock.now()
         run_id = new_id("run")
         async with self.sessions() as s, s.begin():
-            await self.investigator.begin(s, tenant_id, case_id, run_id, self.clock.now())
+            case = await get_case(s, tenant_id, case_id)
+            if case.state != S.OPEN.value:
+                raise NotStartable(f"case {case_id} is {case.state}")
+            await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
+            s.add(
+                Run(
+                    id=run_id,
+                    tenant_id=tenant_id,
+                    case_id=case_id,
+                    stage=Stage.INVESTIGATE.value,
+                    investigation="QUEUED",
+                    workflow_version="pending",
+                    models={},
+                    budget={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await s.flush()
+            audit(s, tenant_id, "investigation_queued", now, case_id=case_id, run_id=run_id)
             self._enqueue(s, tenant_id, run_id, Stage.INVESTIGATE, 0)
         return run_id
 
-    async def start_scripted(self, tenant_id: str, case_id: str, plan: ResolutionPlan) -> str:
+    async def start_scripted(self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str = "scripted") -> str:
         now = self.clock.now()
         run_id = new_id("run")
         async with self.sessions() as s, s.begin():
@@ -129,15 +153,15 @@ class Pipeline:
                     case_id=case_id,
                     stage=Stage.PREPARE.value,
                     investigation="SKIPPED",
-                    workflow_version="scripted",
-                    models={"mode": "scripted"},
+                    workflow_version=source,
+                    models={"mode": source},
                     budget={},
                     created_at=now,
                     updated_at=now,
                 )
             )
             await s.flush()
-            plan_id, _ = await self.executor.record_plan_in(s, tenant_id, case_id, plan, "scripted", run_id)
+            plan_id, _ = await self.executor.record_plan_in(s, tenant_id, case_id, plan, source, run_id)
             await s.execute(update(Run).where(Run.id == run_id).values(plan_id=plan_id))
             self._enqueue(s, tenant_id, run_id, Stage.PREPARE, 0)
         return run_id

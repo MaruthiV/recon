@@ -151,6 +151,20 @@ class Investigator:
             # direct call, no stage machine behind it
             async with self.sessions() as s, s.begin():
                 await self.begin(s, tenant_id, case_id, run_id, now, stage="DIRECT")
+        else:
+            # queued by the pipeline: this worker's prompts and models are the ones that count
+            async with self.sessions() as s, s.begin():
+                await s.execute(
+                    update(Run)
+                    .where(Run.tenant_id == tenant_id, Run.id == run_id)
+                    .values(
+                        investigation="RUNNING",
+                        workflow_version=workflow_version(self.cfg.models),
+                        models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in ROLES}},
+                        budget=self.cfg.budget.as_dict(),
+                        updated_at=now,
+                    )
+                )
         brief = await self._brief(tenant_id, case_id)
 
         async def sink(rec: UsageRecord) -> None:

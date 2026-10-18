@@ -11,6 +11,7 @@ POINTS = {
     "FP3": "after SUBMITTING commits, before the provider call",
     "FP4": "after the provider commits, before the response is saved",
     "FP7": "after the provider call, before the stale worker writes back",
+    "FP10": "after prepare's unlocked check, before it takes the row locks",
 }
 
 

@@ -198,3 +198,29 @@ def test_quote_says_why_not(f, pid, reason, why):
     q = quote(f, pid, reason)
     assert not q.eligible and q.amount is None
     assert why in q.reasons[0]
+
+
+def test_rules_plan_refunds_the_duplicate_and_passes_validation():
+    from recon_domain.rules import rules_plan
+
+    f = facts()
+    p = rules_plan(f)
+    assert (p.recommended_disposition, p.payment_id, p.amount_minor) == ("REFUND", "pay_b", 4900)
+    assert validate(p, f).decision is Decision.AUTHORIZE
+
+
+@pytest.mark.parametrize(
+    ("f", "disposition"),
+    [
+        (facts(payments=(pay("pay_a", 0),)), "ESCALATE"),
+        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))), "ALREADY_REFUNDED"),
+        (facts(now=T0 + timedelta(days=40)), "DENY"),
+        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, amount=5000))), "ESCALATE"),
+    ],
+)
+def test_rules_plan_moves_no_money_when_it_shouldnt(f, disposition):
+    from recon_domain.rules import rules_plan
+
+    p = rules_plan(f)
+    assert p.recommended_disposition == disposition
+    assert validate(p, f).decision is not Decision.AUTHORIZE

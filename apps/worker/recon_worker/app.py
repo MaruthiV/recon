@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -57,6 +59,44 @@ def no_provider_key(_tenant: str):
     raise RuntimeError("this worker has no provider key, money moves through mcp-exec")
 
 
+def investigator_from_env(db, clock: Clock):
+    # RECON_AGENT=live:<model> or replay:<tape path>, unset means this worker can't run INVESTIGATE
+    spec = os.environ.get("RECON_AGENT", "")
+    if not spec:
+        return None
+    from google.adk.models.base_llm import BaseLlm
+    from google.adk.sessions import DatabaseSessionService
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from recon_agents.meter import Pricing
+    from recon_agents.replay import Tape, replay_models
+    from recon_agents.roles import ROLES
+
+    from .investigate import AgentConfig, Investigator
+
+    kind, _, arg = spec.partition(":")
+    models: Mapping[str, BaseLlm | str]
+    if kind == "replay":
+        tape = Tape.load(Path(arg))
+        models, mode, pricing = replay_models(tape), "replay", Pricing.load(tape.header.get("pricing", "2026-10-17"))
+    elif kind == "live" and os.environ.get("RECON_LIVE") == "1":
+        models, mode, pricing = {r: arg for r in ROLES}, "live", Pricing.load("2026-10-17")
+    else:
+        raise RuntimeError("RECON_AGENT=live needs RECON_LIVE=1, or use replay:<tape>")
+    adk = create_async_engine(
+        os.environ.get("RECON_DATABASE_URL") or url("recon_app", "recon"),
+        connect_args={"server_settings": {"search_path": "adk"}},
+    )
+    cfg = AgentConfig(
+        models=models,
+        mode=mode,
+        pricing=pricing,
+        mcp_url=os.environ.get("RECON_MCP_URL", "http://127.0.0.1:8103/mcp"),
+        token_key=os.environ.get("RECON_RUN_TOKEN_KEY", "dev-run-token-key").encode(),
+    )
+    return Investigator(db, clock, cfg, DatabaseSessionService(db_engine=adk))
+
+
 def clock_from_env() -> Clock:
     # tests pin business time so a worker process and the test agree on "now"
     fixed = os.environ.get("RECON_NOW")
@@ -78,7 +118,12 @@ def create_from_env() -> FastAPI:
         connectors = {t: HttpConnector(sim, k["secret"]) for t, k in keys.items()}
         executor = Executor(db, clock, connectors.__getitem__, faults=faults)
     pipeline = Pipeline(
-        db, clock, executor, lease_seconds=int(os.environ.get("RECON_LEASE_SECONDS", "60")), faults=faults
+        db,
+        clock,
+        executor,
+        investigator_from_env(db, clock),
+        lease_seconds=int(os.environ.get("RECON_LEASE_SECONDS", "60")),
+        faults=faults,
     )
     hooks = Webhooks(db, clock, executor.ledger, lambda t: keys.get(t, {}).get("webhook_secret"))
     return create_app(pipeline, os.environ.get("RECON_WORKER_TOKEN", "dev-worker-token"), hooks)

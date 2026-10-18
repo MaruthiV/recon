@@ -30,7 +30,7 @@ from tests.conftest import MCP_URL, RUN_KEY, T, truncate_all
 
 SEED = "dup-charge-1"
 TAPES = Path(__file__).resolve().parents[1] / "fixtures" / "recorded"
-LIVE_TAPE = TAPES / "dup_charge_gemini-3.8-flash.jsonl"
+RECORDED = sorted(TAPES.glob("dup_charge_*.jsonl"))
 
 
 @pytest.fixture
@@ -72,7 +72,15 @@ async def aw(dbs, app_sessions, flaky_sim, op, verifier_engines, mcp_read, clock
         await truncate_all(dbs)
 
     return SimpleNamespace(
-        seed=seed, resolve=resolve, refunds=refunds, verify=verify, rows=rows, reset=reset, sim=flaky_sim, op=op
+        seed=seed,
+        resolve=resolve,
+        refunds=refunds,
+        verify=verify,
+        rows=rows,
+        reset=reset,
+        sim=flaky_sim,
+        op=op,
+        mcp=mcp_read,
     )
 
 
@@ -232,10 +240,11 @@ async def test_recorded_tape_replays_without_the_model(aw, tmp_path):
     assert (await aw.verify(sd)).passed
 
 
-async def test_duplicate_charge_agent_path_recorded(aw):
-    if not LIVE_TAPE.exists():
-        pytest.skip("no recorded gemini tape yet, it comes from the G2 live run")
-    tape = Tape.load(LIVE_TAPE)
+@pytest.mark.parametrize("path", RECORDED or [None], ids=lambda p: p.stem if p else "none")
+async def test_duplicate_charge_agent_path_recorded(aw, path):
+    if path is None:
+        pytest.skip("no recorded gemini tape yet, it comes from a live run")
+    tape = Tape.load(path)
     sd = await aw.seed()
     out = await aw.resolve(sd, replay_models(tape), mode="replay", pricing=Pricing.load(tape.header["pricing"]))
     assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED")
@@ -273,4 +282,21 @@ async def test_duplicate_charge_agent_path(aw):
     assert len(await aw.refunds()) == 1
     assert (await aw.verify(sd)).passed
     if os.environ.get("RECON_RECORD") == "1":
-        tape.save(LIVE_TAPE)
+        tape.save(TAPES / f"dup_charge_{model}.jsonl")
+
+
+@pytest.mark.parametrize(("drops", "closes"), [(2, True), (1000, False)])
+async def test_fp11_mcp_read_drops_are_retried_or_escalated_never_guessed(aw, drops, closes):
+    sd = await aw.seed()
+    aw.mcp.drop_next = drops
+    out = await aw.resolve(sd, fake_models())
+
+    refunds = await aw.refunds()
+    if closes:
+        # a couple of dropped reads: the agent asks again inside its budget and finishes
+        assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED")
+        assert len(refunds) == 1
+    else:
+        # the read service stays down: no evidence, no plan, no money
+        assert out.case_state is S.ESCALATED
+        assert await aw.rows(Plan) == [] and refunds == []
