@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from recon_fixtures.dup_charge import seed_duplicate_charge
+from recon_retrieval.index import index_from_env
 from recon_storage.db import DbNames, make_engine, sessions, url
 from recon_worker.app import TOKEN_HEADER
 from recon_worker.dispatch import Dispatcher, Sweeper
@@ -82,10 +83,11 @@ async def dev(names: DbNames, agent: str | None, web: bool) -> int:
                 "RECON_EXEC_URL": f"http://127.0.0.1:{PORTS['exec']}/mcp",
                 "RECON_EXEC_KEY": "dev-exec-key",
                 "RECON_MCP_URL": f"http://127.0.0.1:{PORTS['read']}/mcp",
-                # webhook secrets only, the worker has no provider key in this shape
+                # webhook secrets and the restricted read key, the worker can't create refunds in this shape
                 "RECON_PROVIDER_KEYS": json.dumps(
-                    {t: {"webhook_secret": k["webhook_secret"]} for t, k in keys.items()}
+                    {t: {"webhook_secret": k["webhook_secret"], "read": k["read"]} for t, k in keys.items()}
                 ),
+                "RECON_SIM_URL": f"http://127.0.0.1:{PORTS['sim']}",
                 "RECON_FAULTS": "1",
                 "RECON_LEASE_SECONDS": "5",
                 "RECON_WORKER_TOKEN": WORKER_TOKEN,
@@ -115,6 +117,8 @@ async def dev(names: DbNames, agent: str | None, web: bool) -> int:
                 db, sim, {"x-sim-operator": OPERATOR}, evals, datetime.now(UTC), tenant=TENANT
             )
         log("seed", f"new demo case {sd.case_id} for tenant {sd.tenant_id}")
+        if (indexed := await index_from_env(db)) is not None:
+            log("seed", f"embedded {indexed} policy chunks, mcp-read searches hybrid")
         log(
             "ready", f"http://localhost:{PORTS['web']}/cases/{sd.case_id}  (sign in as any name, tenant {sd.tenant_id})"
         )

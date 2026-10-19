@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -7,7 +8,7 @@ from enum import StrEnum
 from .balances import ClaimBalance, PaymentBalance, remaining_minor
 from .entitlements import duplicate_capture_ref, prorate_ref, return_ref
 from .money import Currency, Money
-from .plan import MONEY_DISPOSITIONS, ReasonCode, ResolutionPlan
+from .plan import MONEY_DISPOSITIONS, Disposition, ReasonCode, ResolutionPlan
 from .policy import AmbiguousPolicy, OperationalLimits, RefundTerms, applicable
 from .proration import Rounding, prorate
 
@@ -93,6 +94,8 @@ class CaseFacts:
     lines: tuple[LineFact, ...] = ()
     returns: tuple[ReturnFact, ...] = ()
     subscription: SubscriptionFact | None = None
+    # payment id -> statuses of the refunds a fresh provider read saw, None when nobody looked
+    provider_refunds: Mapping[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +211,18 @@ def _entitlement(
             return Refused(Decision.ESCALATE, f"{reason} isn't a reason to move money")
 
 
+_REFUNDABLE = frozenset({ReasonCode.DUPLICATE_CAPTURE, ReasonCode.RETURNED_ITEMS, ReasonCode.PRORATED_CANCELLATION})
+_ASKING = frozenset({ReasonCode.MISSING_EVIDENCE, ReasonCode.CONFLICTING_EVIDENCE})
+# escalating is always allowed, whatever the reason
+REASONS_FOR: dict[Disposition, frozenset[ReasonCode]] = {
+    Disposition.REFUND: _REFUNDABLE,
+    Disposition.PARTIAL_REFUND: _REFUNDABLE,
+    Disposition.ALREADY_REFUNDED: frozenset({ReasonCode.EXISTING_REFUND}),
+    Disposition.DENY: frozenset({ReasonCode.INELIGIBLE}),
+    Disposition.REQUEST_INFORMATION: _ASKING,
+}
+
+
 def _cited(plan: ResolutionPlan, kind: str) -> list[str]:
     return [ref.split(":")[1] for ref in plan.evidence_refs if ref.startswith(f"{kind}:") and ref.count(":") >= 2]
 
@@ -225,6 +240,8 @@ def _check_evidence(
         kind, _, rest = ref.partition(":")
         if kind in versions:
             rid, _, ver = rest.partition(":")
+            if not ver:
+                return _reject(f"evidence {ref} has no version, cite it as {kind}:<id>:v<n>")
             found = versions[kind].get(rid)
             if found is None:
                 return _reject(f"evidence {ref} isn't on this case's order")
@@ -259,16 +276,36 @@ class Quote:
     claim_id: str | None = None
     amount: Money | None = None
     terms_policy_id: str | None = None
+    # the exact versioned refs a plan built on this quote cites, so nobody rebuilds them by hand
+    cites: tuple[str, ...] = ()
+
+
+def _cites(facts: CaseFacts, payment: PaymentFact, reason: ReasonCode, subject_id: str | None) -> tuple[str, ...]:
+    refs = [f"payment:{payment.id}:v{payment.version}"]
+    if reason is ReasonCode.DUPLICATE_CAPTURE and (orig := _original_capture(payment, facts.payments)) is not None:
+        refs.insert(0, f"payment:{orig.id}:v{orig.version}")
+    mine = [r for r in facts.returns if r.order_id == facts.order_id]
+    if reason is ReasonCode.RETURNED_ITEMS:
+        ret = next((r for r in mine if r.id == subject_id), None) if subject_id else None
+        ret = ret or (mine[0] if subject_id is None and len(mine) == 1 else None)
+        if ret is not None:
+            refs.append(f"return:{ret.id}:v{ret.version}")
+    sub = facts.subscription
+    if reason is ReasonCode.PRORATED_CANCELLATION and sub is not None and sub.order_id == facts.order_id:
+        refs.append(f"subscription:{sub.id}:v{sub.version}")
+    return tuple(refs)
 
 
 def quote(facts: CaseFacts, payment_id: str, reason: ReasonCode, subject_id: str | None = None) -> Quote:
     # arithmetic only, validate() still decides, tests pin the two together
-    def no(why: str) -> Quote:
-        return Quote(payment_id, False, (why,))
-
     payment = next((p for p in facts.payments if p.id == payment_id), None)
     if payment is None:
-        return no("payment isn't on this case's order")
+        return Quote(payment_id, False, ("payment isn't on this case's order",))
+    cites = _cites(facts, payment, reason, subject_id)
+
+    def no(why: str) -> Quote:
+        return Quote(payment_id, False, (why,), cites=cites)
+
     if payment.status != "succeeded":
         return no(f"payment status is {payment.status}")
     try:
@@ -283,7 +320,7 @@ def quote(facts: CaseFacts, payment_id: str, reason: ReasonCode, subject_id: str
     claim = facts.claims.get(ent.ref)
     left = _left(ent, claim, payment)
     if left == 0:
-        return Quote(payment_id, False, ("nothing left to refund",), ent.ref, claim.id if claim else None)
+        return Quote(payment_id, False, ("nothing left to refund",), ent.ref, claim.id if claim else None, cites=cites)
     return Quote(
         payment_id,
         True,
@@ -292,7 +329,25 @@ def quote(facts: CaseFacts, payment_id: str, reason: ReasonCode, subject_id: str
         claim.id if claim else None,
         Money(left, payment.amount.currency),
         terms.policy.id,
+        cites,
     )
+
+
+def _already_refunded(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
+    # "the money already went back" is a claim about money, so it gets checked like one
+    payment = next((p for p in facts.payments if p.id == plan.payment_id), None)
+    if payment is None:
+        return _reject("ALREADY_REFUNDED has to name a payment on this case's order")
+    if payment.refunded_minor > 0:
+        return Verdict(Decision.NO_MONEY, ("ALREADY_REFUNDED moves no money", "recon's ledger shows the refund"))
+    seen = None if facts.provider_refunds is None else facts.provider_refunds.get(payment.id)
+    if seen is None:
+        return Verdict(Decision.ESCALATE, (f"can't confirm a refund on {payment.id} without a provider read",))
+    if any(st not in ("failed", "canceled") for st in seen):
+        return Verdict(
+            Decision.NO_MONEY, ("ALREADY_REFUNDED moves no money", f"provider shows a refund on {payment.id}")
+        )
+    return _reject(f"no refund exists on {payment.id}")
 
 
 def validate(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
@@ -300,6 +355,12 @@ def validate(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
         return _reject("plan is for a different case")
     if plan.case_version != facts.case_version:
         return Verdict(Decision.STALE, (f"plan case v{plan.case_version}, current v{facts.case_version}",))
+    allowed = REASONS_FOR.get(plan.recommended_disposition)
+    if allowed is not None and plan.reason_code not in allowed:
+        # a plan that contradicts itself goes to a person, it doesn't close the case
+        return _reject(f"{plan.recommended_disposition} doesn't go with reason {plan.reason_code}")
+    if plan.recommended_disposition is Disposition.ALREADY_REFUNDED:
+        return _already_refunded(plan, facts)
     if plan.recommended_disposition not in MONEY_DISPOSITIONS:
         return Verdict(Decision.NO_MONEY, (f"{plan.recommended_disposition} moves no money",))
 

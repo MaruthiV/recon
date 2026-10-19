@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from recon_domain.connector import Clock, PaymentConnector, ProviderGateway
+from recon_domain.connector import Clock, PaymentConnector, ProviderGateway, ReadFailed, RefundReader
 from recon_domain.plan import MONEY_DISPOSITIONS, Disposition, ResolutionPlan, material_hash
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision, Verdict, validate
-from recon_storage.models import Plan
+from recon_storage.models import Payment, Plan
 from recon_storage.repos import NotFound, audit, get_case, load_case_facts, move_case, new_id
 
 from .faults import NO_FAULTS, Faults
@@ -59,9 +60,12 @@ class Executor:
         max_reconcile_rounds: int = 5,
         faults: Faults = NO_FAULTS,
         gateway_for: Callable[[str], ProviderGateway] | None = None,
+        reader_for: Callable[[str], RefundReader] | None = None,
     ) -> None:
         self.sessions = sessions
         self.clock = clock
+        # read-only provider access to check "already refunded" claims, a keyless worker gets a restricted key
+        self.reader_for = reader_for if reader_for is not None else (connector_for if gateway_for is None else None)
         self.ledger = Ledger(sessions, clock, connector_for, safe_window, faults, gateway_for)
         self.max_rounds = max_reconcile_rounds
 
@@ -75,23 +79,57 @@ class Executor:
             audit(s, tenant_id, "case_state", now, case_id=case_id, src=src.value, dst=dst.value, **why)
         return dst
 
+    async def observe(self, tenant_id: str, case_id: str, plan: ResolutionPlan) -> dict[str, tuple[str, ...]] | None:
+        # only a claim that money already moved needs a fresh look at the provider, done outside any transaction
+        if plan.recommended_disposition is not Disposition.ALREADY_REFUNDED or plan.payment_id is None:
+            return None
+        if self.reader_for is None:
+            return None
+        async with self.sessions() as s:
+            case = await get_case(s, tenant_id, case_id)
+            pi = (
+                await s.execute(
+                    select(Payment.provider_payment_id).where(
+                        Payment.tenant_id == tenant_id,
+                        Payment.id == plan.payment_id,
+                        Payment.order_id == case.order_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if pi is None:
+            return None
+        try:
+            refunds = await self.reader_for(tenant_id).list_refunds(pi)
+        except ReadFailed:
+            return None
+        return {plan.payment_id: tuple(r.status for r in refunds)}
+
     async def record_plan(
         self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str, run_id: str | None = None
     ) -> tuple[str, Verdict]:
+        seen = await self.observe(tenant_id, case_id, plan)
         async with self.sessions() as s, s.begin():
-            return await self.record_plan_in(s, tenant_id, case_id, plan, source, run_id)
+            return await self.record_plan_in(s, tenant_id, case_id, plan, source, run_id, seen)
 
     async def record_plan_in(
-        self, s: AsyncSession, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str, run_id: str | None
+        self,
+        s: AsyncSession,
+        tenant_id: str,
+        case_id: str,
+        plan: ResolutionPlan,
+        source: str,
+        run_id: str | None,
+        provider_refunds: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[str, Verdict]:
         now = self.clock.now()
         case = await get_case(s, tenant_id, case_id)
-        if case.state == S.OPEN.value:
-            await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
+        if case.state in (S.OPEN.value, S.AWAITING_INFO.value):
+            await move_case(s, tenant_id, case_id, S(case.state), S.INVESTIGATING, now)
             case.state = S.INVESTIGATING.value
         await move_case(s, tenant_id, case_id, S(case.state), S.VALIDATING, now)
         try:
-            verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
+            facts = replace(await load_case_facts(s, tenant_id, case_id, now), provider_refunds=provider_refunds)
+            verdict = validate(plan, facts)
         except NotFound:
             # no order yet: asking for one is fine, moving money isn't
             verdict = (

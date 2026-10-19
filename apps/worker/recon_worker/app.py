@@ -12,8 +12,8 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from recon_domain.connector import Clock, FakeClock, SystemClock
-from recon_provider.http import HttpConnector
+from recon_domain.connector import Clock, FakeClock, ReadFailed, SystemClock
+from recon_provider.http import HttpConnector, HttpRefundReader
 from recon_storage.db import make_engine, sessions, url
 
 from .exec_client import McpExecGateway
@@ -111,9 +111,19 @@ def create_from_env() -> FastAPI:
     faults = Faults(db, enabled=enabled_from_env())
     exec_url = os.environ.get("RECON_EXEC_URL")
     if exec_url:
-        # the deployed shape: money moves only through mcp-exec, this process never sees a provider key
+        # the deployed shape: money moves only through mcp-exec, this process only ever holds read keys
         gateway = McpExecGateway(exec_url, os.environ["RECON_EXEC_KEY"].encode(), clock)
-        executor = Executor(db, clock, no_provider_key, faults=faults, gateway_for=lambda _t: gateway)
+        sim = httpx.AsyncClient(base_url=os.environ.get("RECON_SIM_URL", "http://localhost:8100"))
+        readers = {t: HttpRefundReader(sim, k["read"]) for t, k in keys.items() if k.get("read")}
+
+        def reader_for(tenant: str) -> HttpRefundReader:
+            if tenant not in readers:
+                raise ReadFailed(f"no read key for {tenant}")
+            return readers[tenant]
+
+        executor = Executor(
+            db, clock, no_provider_key, faults=faults, gateway_for=lambda _t: gateway, reader_for=reader_for
+        )
     else:
         sim = httpx.AsyncClient(base_url=os.environ.get("RECON_SIM_URL", "http://localhost:8100"))
         connectors = {t: HttpConnector(sim, k["secret"]) for t, k in keys.items()}

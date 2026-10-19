@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
@@ -27,7 +28,8 @@ GRAPH = "START -> (payment_investigator, policy_specialist) -> join -> brief -> 
 
 
 def prompt(role: str) -> str:
-    return (PROMPTS / f"{role}.txt").read_text()
+    # a prompt variant under test can live outside the repo, its text still lands in workflow_version
+    return (Path(os.environ.get("RECON_PROMPTS_DIR") or PROMPTS) / f"{role}.txt").read_text()
 
 
 def model_id(m: BaseLlm | str) -> str:

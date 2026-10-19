@@ -1,19 +1,23 @@
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy import select, text
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from recon_domain.connector import Clock, SystemClock
+from recon_domain.plan import canonical_hash
+from recon_domain.states import CaseState
 from recon_domain.tokens import BadToken, mint, verify
 from recon_storage.db import make_engine, sessions, url
-from recon_storage.models import Case, CaseMessage, Command, Order, Payment, Plan, Run, Tenant
+from recon_storage.models import ApiRequest, Case, CaseMessage, Command, Order, OutboxEvent, Payment, Plan, Run, Tenant
 from recon_worker.executor import Executor
 from recon_worker.pipeline import NotStartable, Pipeline
 from recon_worker.rules_planner import plan_by_rules
@@ -57,10 +61,26 @@ class Decide(BaseModel):
 
 class Start(BaseModel):
     mode: Literal["rules", "agent"]
+    case_version: int  # the version the client was looking at
+
+
+class Reply(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+    case_version: int
+    order_id: str | None = None
+    mode: Literal["rules", "agent"] = "agent"  # how to re-investigate if the case was waiting on this
+
+
+class Requeue(BaseModel):
+    note: str = ""
 
 
 class Arm(BaseModel):
     point: Literal["FP2", "FP3", "FP4"]
+
+
+IDEMPOTENCY_KEY = "Idempotency-Key"
+ABANDONED = timedelta(seconds=60)  # an unanswered key this old means the first try died
 
 
 def no_provider_key(_tenant: str):
@@ -91,6 +111,53 @@ TenantId = Annotated[str, Depends(tenant_of)]
 
 def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bool, faults_enabled: bool) -> FastAPI:
     app = FastAPI(title="recon-api")
+
+    async def once(request: Request, tenant: str, body: BaseModel, work: Callable[[], Awaitable[dict]]) -> JSONResponse:
+        # a retried write with the same key gets the first answer back, a different body under that key is refused
+        key = request.headers.get(IDEMPOTENCY_KEY, "")
+        if not 8 <= len(key) <= 200:
+            raise HTTPException(428, f"write requests need an {IDEMPOTENCY_KEY} header (8-200 chars)")
+        route = request.url.path
+        digest = canonical_hash({"route": route, "body": body.model_dump(mode="json")})
+        now = clock.now()
+        mine = (ApiRequest.tenant_id == tenant, ApiRequest.key == key)
+        async with db() as s, s.begin():
+            claimed = (
+                await s.execute(
+                    insert(ApiRequest)
+                    .values(tenant_id=tenant, key=key, route=route, request_hash=digest, created_at=now)
+                    .on_conflict_do_nothing()
+                    .returning(ApiRequest.key)
+                )
+            ).scalar_one_or_none()
+            if claimed is None:
+                row = (await s.execute(select(ApiRequest).where(*mine).with_for_update())).scalar_one()
+                if row.request_hash != digest:
+                    raise HTTPException(422, f"this {IDEMPOTENCY_KEY} was already used for a different request")
+                if row.status_code is not None:
+                    return JSONResponse(row.response, row.status_code, headers={"Idempotent-Replayed": "true"})
+                if now - row.created_at < ABANDONED:
+                    raise HTTPException(409, "a request with this key is still in progress")
+                row.created_at = now  # the first try died part way, this one takes over
+        try:
+            status, out = 202, await work()
+        except HTTPException as e:
+            if e.status_code >= 500:
+                await forget(tenant, key)
+                raise
+            status, out = e.status_code, {"detail": e.detail}
+        except Exception:
+            await forget(tenant, key)
+            raise
+        async with db() as s, s.begin():
+            await s.execute(update(ApiRequest).where(*mine).values(status_code=status, response=out))
+        return JSONResponse(out, status)
+
+    async def forget(tenant: str, key: str) -> None:
+        # a server error isn't an answer, let the retry run for real
+        async with db() as s, s.begin():
+            await s.execute(delete(ApiRequest).where(ApiRequest.tenant_id == tenant, ApiRequest.key == key))
+
     app.state.session_key = session_key
     app.state.clock = clock
     pipeline = Pipeline(db, clock, Executor(db, clock, no_provider_key), worker_id="api")
@@ -153,7 +220,7 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                     await s.execute(
                         select(Plan)
                         .where(Plan.tenant_id == tenant, Plan.case_id.in_([c.id for c in cases]))
-                        .order_by(Plan.created_at)
+                        .order_by(Plan.seq)
                     )
                 ).scalars()
             }
@@ -202,16 +269,13 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
                 await s.execute(
                     select(Plan)
                     .where(Plan.tenant_id == tenant, Plan.case_id == case_id)
-                    .order_by(Plan.created_at.desc())
+                    .order_by(Plan.seq.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
             run = (
                 await s.execute(
-                    select(Run)
-                    .where(Run.tenant_id == tenant, Run.case_id == case_id)
-                    .order_by(Run.created_at.desc())
-                    .limit(1)
+                    select(Run).where(Run.tenant_id == tenant, Run.case_id == case_id).order_by(Run.seq.desc()).limit(1)
                 )
             ).scalar_one_or_none()
         return {
@@ -363,34 +427,105 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    async def run(tenant: str, case_id: str, mode: str, version: int) -> str:
+        if mode == "agent":
+            return await pipeline.start_agent(tenant, case_id, expected_version=version)
+        async with db() as s:
+            plan = await plan_by_rules(s, tenant, case_id, clock.now())
+        if plan.case_version != version:
+            raise NotStartable(f"case changed since v{version}, it's v{plan.case_version} now")
+        return await pipeline.start_scripted(tenant, case_id, plan, source="rules")
+
     @app.post("/v1/cases/{case_id}/investigations", status_code=202)
-    async def start(case_id: str, body: Start, tenant: TenantId):
-        case = await own_case(tenant, case_id)
-        if case.state != "OPEN":
-            raise HTTPException(409, f"case is {case.state}, already started")
-        try:
-            if body.mode == "agent":
-                run_id = await pipeline.start_agent(tenant, case_id)
-            else:
-                async with db() as s:
-                    plan = await plan_by_rules(s, tenant, case_id, clock.now())
-                run_id = await pipeline.start_scripted(tenant, case_id, plan, source="rules")
-        except NotStartable as e:
-            raise HTTPException(409, str(e)) from e
-        return {"run_id": run_id, "mode": body.mode}
+    async def start(case_id: str, body: Start, tenant: TenantId, request: Request):
+        async def work() -> dict:
+            case = await own_case(tenant, case_id)
+            if case.state != "OPEN":
+                raise HTTPException(409, f"case is {case.state}, already started")
+            try:
+                run_id = await run(tenant, case_id, body.mode, body.case_version)
+            except NotStartable as e:
+                raise HTTPException(409, str(e)) from e
+            return {"run_id": run_id, "mode": body.mode}
+
+        return await once(request, tenant, body, work)
+
+    @app.post("/v1/cases/{case_id}/messages", status_code=202)
+    async def reply(case_id: str, body: Reply, tenant: TenantId, request: Request):
+        # a reply to a case that was waiting on the customer picks the investigation back up
+        async def work() -> dict:
+            await own_case(tenant, case_id)
+            try:
+                was = await pipeline.add_message(
+                    tenant, case_id, body.body, body.order_id, expected_version=body.case_version
+                )
+                resume = was is CaseState.AWAITING_INFO
+                run_id = await run(tenant, case_id, body.mode, body.case_version + 1) if resume else None
+            except NotStartable as e:
+                raise HTTPException(409, str(e)) from e
+            return {"run_id": run_id, "resumed": run_id is not None}
+
+        return await once(request, tenant, body, work)
 
     @app.post("/v1/plans/{plan_id}/approvals", status_code=202)
-    async def decide(plan_id: str, body: Decide, claims: Claims):
+    async def decide(plan_id: str, body: Decide, claims: Claims, request: Request):
         # the client sends the hash of the plan it showed, a plan that changed since can't be approved by accident
         if claims.get("role") != "supervisor":
             raise HTTPException(403, "only a supervisor can approve refunds")
-        try:
-            run_id = await pipeline.approve(
-                claims["tenant"], plan_id, body.plan_hash, claims["user"], claims["role"], body.decision
-            )
-        except NotStartable as e:
-            raise HTTPException(404 if "no such plan" in str(e) else 409, str(e)) from e
-        return {"decision": body.decision, "run_id": run_id}
+
+        async def work() -> dict:
+            try:
+                run_id = await pipeline.approve(
+                    claims["tenant"], plan_id, body.plan_hash, claims["user"], claims["role"], body.decision
+                )
+            except NotStartable as e:
+                raise HTTPException(404 if "no such plan" in str(e) else 409, str(e)) from e
+            return {"decision": body.decision, "run_id": run_id}
+
+        return await once(request, claims["tenant"], body, work)
+
+    def supervisor(claims: dict) -> str:
+        if claims.get("role") != "supervisor":
+            raise HTTPException(403, "supervisors only")
+        return claims["tenant"]
+
+    @app.get("/v1/ops/dead-letters")
+    async def dead_letters(claims: Claims):
+        # work the dispatcher gave up on, for a person to look at and re-drive
+        tenant = supervisor(claims)
+        async with db() as s:
+            rows = (
+                await s.execute(
+                    select(OutboxEvent, Run.case_id)
+                    .join(Run, Run.id == OutboxEvent.run_id)
+                    .where(OutboxEvent.tenant_id == tenant, OutboxEvent.dead_at.is_not(None))
+                    .order_by(OutboxEvent.id)
+                )
+            ).all()
+        return [
+            {
+                "id": ev.id,
+                "case_id": case_id,
+                "run_id": ev.run_id,
+                "stage": ev.stage,
+                "attempts": ev.attempts,
+                "last_error": ev.last_error,
+                "dead_at": iso(ev.dead_at),
+            }
+            for ev, case_id in rows
+        ]
+
+    @app.post("/v1/ops/dead-letters/{outbox_id}/requeue", status_code=202)
+    async def requeue(outbox_id: int, body: Requeue, claims: Claims, request: Request):
+        tenant = supervisor(claims)
+
+        async def work() -> dict:
+            try:
+                return {"requeued": await pipeline.requeue_dead(tenant, outbox_id, claims["user"])}
+            except NotStartable as e:
+                raise HTTPException(404 if "no such" in str(e) else 409, str(e)) from e
+
+        return await once(request, tenant, body, work)
 
     @app.post("/internal/demo/faults")
     async def arm(body: Arm, _: TenantId):

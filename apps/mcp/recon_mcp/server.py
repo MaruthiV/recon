@@ -15,6 +15,8 @@ from recon_domain.plan import ReasonCode
 from recon_domain.policy import AuthorityClass, PolicyVersion
 from recon_domain.tokens import MCP_READ, RUN_TOKEN_HEADER, BadToken, verify
 from recon_domain.validation import quote
+from recon_retrieval.embed import Embedder
+from recon_retrieval.search import search
 from recon_storage.db import make_engine, new_id, sessions
 from recon_storage.models import (
     Case,
@@ -162,6 +164,7 @@ def create_app(
     reader_for: Callable[[str], RefundReader],
     clock: Clock | None = None,
     host: str = "127.0.0.1",
+    embedder: Embedder | None = None,
 ) -> ReadService:
     clock = clock or SystemClock()
     engine = make_engine(dsn)
@@ -424,18 +427,7 @@ def create_app(
             if case is None:
                 return call.none("case not found")
             docs = {d.id: d for d in await applicable_docs(s, call, case)}
-            rows = (
-                await s.execute(
-                    text(
-                        # any-term match, ranked, so long natural queries still hit
-                        "WITH x AS (SELECT replace(plainto_tsquery('english', :q)::text, '&', '|')::tsquery AS q) "
-                        "SELECT policy_document_id, section_id, heading, text FROM policy_chunks, x "
-                        "WHERE tenant_id = :t AND policy_document_id = ANY(:docs) AND tsv @@ x.q "
-                        "ORDER BY ts_rank(tsv, x.q) DESC, section_id LIMIT :k"
-                    ),
-                    {"q": query, "t": call.tenant_id, "docs": list(docs), "k": MAX_HITS},
-                )
-            ).all()
+            found = await search(s, call.tenant_id, list(docs), query, embedder=embedder, k=MAX_HITS)
         hits = [
             PolicySection(
                 ref=f"policy:{r.policy_document_id}:{r.section_id}",
@@ -447,9 +439,9 @@ def create_app(
                 text=r.text,
                 applies_to_case=True,
             )
-            for r in rows
+            for r in found.hits
         ]
-        data = PolicySearch(query=query, applicable_policy_ids=sorted(docs), hits=hits)
+        data = PolicySearch(query=query, applicable_policy_ids=sorted(docs), hits=hits, retrieval=found.mode)
         if not hits:
             return Result(
                 status=Status.NONE_FOUND,
@@ -526,8 +518,9 @@ def create_app(
             entitlement_ref=q.entitlement_ref,
             claim_id=q.claim_id,
             terms_policy_id=q.terms_policy_id,
+            evidence_refs=list(q.cites),
         )
-        return call.found(view, [f"payment:{payment_id}"])
+        return call.found(view, list(q.cites))
 
     inner = server.streamable_http_app(stateless_http=True, json_response=True, host=host)
     return ReadService(inner, engine, key, clock)
@@ -542,6 +535,7 @@ def create_read_from_env() -> ReadService:
 
     from recon_domain.connector import FakeClock
     from recon_provider.http import HttpRefundReader
+    from recon_retrieval.embed import embedder_from_env
     from recon_storage.db import url
 
     keys = json.loads(os.environ.get("RECON_PROVIDER_KEYS", "{}"))
@@ -554,4 +548,5 @@ def create_read_from_env() -> ReadService:
         readers.__getitem__,
         FakeClock(datetime.fromisoformat(fixed)) if fixed else SystemClock(),
         os.environ.get("RECON_MCP_HOST", "127.0.0.1"),
+        embedder_from_env(),
     )

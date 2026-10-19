@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
 import { Timeline } from "@/components/Timeline";
 import { api, type CaseDetail, micros, money, NotSignedIn, when } from "@/lib/api";
@@ -37,7 +37,10 @@ export default function Workspace() {
   async function start(mode: "rules" | "agent") {
     setBusy(true);
     try {
-      await api(`/v1/cases/${id}/investigations`, { method: "POST", body: JSON.stringify({ mode }) });
+      await api(`/v1/cases/${id}/investigations`, {
+        method: "POST",
+        body: JSON.stringify({ mode, case_version: d?.case.version }),
+      });
       setNote(`Started a ${mode} investigation.`);
       load();
     } catch (e) {
@@ -60,6 +63,32 @@ export default function Workspace() {
       load();
     } catch (e) {
       setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reply(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const el = e.currentTarget;
+    const form = new FormData(el);
+    const order = String(form.get("order_id") ?? "").trim();
+    setBusy(true);
+    try {
+      const r = await api<{ resumed: boolean }>(`/v1/cases/${id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          body: form.get("body"),
+          order_id: order || null,
+          mode: form.get("mode") ?? undefined,
+          case_version: d?.case.version,
+        }),
+      });
+      setNote(r.resumed ? "Reply added, the case is being investigated again." : "Reply added to the case.");
+      el.reset();
+      load();
+    } catch (err) {
+      setNote(String(err));
     } finally {
       setBusy(false);
     }
@@ -113,11 +142,31 @@ export default function Workspace() {
         <div>
           <div className="panel">
             <h2>Customer request</h2>
-            {d.messages.map((m) => (
-              <p key={m.created_at} className="quote">
+            {d.messages.map((m, i) => (
+              <p key={`${m.created_at}-${i}`} className="quote">
                 {m.body}
               </p>
             ))}
+            {c.state === "AWAITING_INFO" && plan && plan.payload.missing_evidence.length > 0 && (
+              <p className="muted">Waiting on the customer for: {plan.payload.missing_evidence.join(", ")}.</p>
+            )}
+            {c.state !== "CLOSED" && (
+              <form onSubmit={reply} style={{ display: "grid", gap: 8 }}>
+                <textarea name="body" required rows={2} placeholder="Customer's reply" />
+                <div className="row">
+                  <input name="order_id" placeholder="Order id, if they gave one" />
+                  {c.state === "AWAITING_INFO" && (
+                    <select name="mode" defaultValue={plan?.source === "rules" ? "rules" : "agent"}>
+                      <option value="agent">then re-investigate with agents</option>
+                      <option value="rules">then re-investigate with rules</option>
+                    </select>
+                  )}
+                  <button disabled={busy} type="submit">
+                    Add reply
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
 
           <div className="panel">

@@ -8,6 +8,16 @@ export type CaseRow = {
   needs_approval: boolean;
 };
 
+export type DeadLetter = {
+  id: number;
+  case_id: string;
+  run_id: string;
+  stage: string;
+  attempts: number;
+  last_error: string | null;
+  dead_at: string;
+};
+
 export type Payment = {
   id: string;
   provider_payment_id: string;
@@ -89,9 +99,11 @@ export type TimelineEvent = {
 export class NotSignedIn extends Error {}
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  // one key per write, so a resent request gets the first answer instead of doing it twice
+  const key: Record<string, string> = init?.method === "POST" ? { "Idempotency-Key": crypto.randomUUID() } : {};
   const r = await fetch(`/api${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", ...key, ...(init?.headers ?? {}) },
     cache: "no-store",
   });
   if (r.status === 401) throw new NotSignedIn();

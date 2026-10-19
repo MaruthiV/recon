@@ -354,3 +354,99 @@ def test_proration_that_isnt_owed(f, why):
     q = quote(f, "pay_a", ReasonCode.PRORATED_CANCELLATION)
     assert not q.eligible and why in q.reasons[0]
     assert validate(prorate_plan(100), f).decision is Decision.REJECT
+
+
+def test_a_ref_without_its_version_is_rejected_not_stale():
+    v = validate(plan(evidence_refs=["payment:pay_a:v1", "payment:pay_b", "policy:pol_terms_v1:dup"]), facts())
+    assert v.decision is Decision.REJECT and "has no version" in v.reasons[0]
+
+
+@pytest.mark.parametrize(
+    ("f", "args", "cites"),
+    [
+        (facts(), ("pay_b", ReasonCode.DUPLICATE_CAPTURE), ("payment:pay_a:v1", "payment:pay_b:v1")),
+        (return_facts(), ("pay_a", ReasonCode.RETURNED_ITEMS), ("payment:pay_a:v1", "return:ret_1:v1")),
+        (
+            return_facts(ret("ret_1"), ret("ret_2", version=3)),
+            ("pay_a", ReasonCode.RETURNED_ITEMS, "ret_2"),
+            ("payment:pay_a:v1", "return:ret_2:v3"),
+        ),
+        (prorate_facts(), ("pay_a", ReasonCode.PRORATED_CANCELLATION), ("payment:pay_a:v1", "subscription:sub_1:v1")),
+        # a refused quote still says what it looked at
+        (
+            return_facts(ret(received=False)),
+            ("pay_a", ReasonCode.RETURNED_ITEMS),
+            ("payment:pay_a:v1", "return:ret_1:v1"),
+        ),
+    ],
+)
+def test_a_quote_hands_back_the_refs_a_plan_must_cite(f, args, cites):
+    q = quote(f, *args)
+    assert q.cites == cites
+    if q.eligible:
+        assert q.amount is not None and q.terms_policy_id is not None
+        p = plan(
+            payment_id=args[0],
+            amount_minor=q.amount.amount_minor,
+            reason_code=args[1],
+            evidence_refs=[*q.cites, f"policy:{q.terms_policy_id}:x"],
+        )
+        assert validate(p, f).decision is Decision.AUTHORIZE
+
+
+@pytest.mark.parametrize(
+    ("disposition", "reason", "ok"),
+    [
+        ("ALREADY_REFUNDED", "INELIGIBLE", False),
+        ("ALREADY_REFUNDED", "EXISTING_REFUND", True),
+        ("DENY", "EXISTING_REFUND", False),
+        ("DENY", "INELIGIBLE", True),
+        ("REQUEST_INFORMATION", "MISSING_EVIDENCE", True),
+        ("REQUEST_INFORMATION", "DUPLICATE_CAPTURE", False),
+        ("ESCALATE", "DUPLICATE_CAPTURE", True),
+        ("REFUND", "INELIGIBLE", False),
+    ],
+)
+def test_a_plan_that_contradicts_itself_is_rejected(disposition, reason, ok):
+    p = plan(
+        recommended_disposition=disposition,
+        reason_code=reason,
+        **({} if disposition == "REFUND" else {"amount_minor": None, "currency": None}),
+    )
+    v = validate(p, facts())
+    assert (v.decision is not Decision.REJECT) is ok, v.reasons
+
+
+def refunded_claim(**kw):
+    base = dict(
+        recommended_disposition="ALREADY_REFUNDED",
+        reason_code="EXISTING_REFUND",
+        payment_id="pay_b",
+        amount_minor=None,
+        currency=None,
+    )
+    return plan(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    ("f", "decision", "why"),
+    [
+        # recon's own ledger already shows money going back
+        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))), Decision.NO_MONEY, "ledger"),
+        # a refund only the provider knows about, pending counts
+        (facts(provider_refunds={"pay_b": ("pending",)}), Decision.NO_MONEY, "provider shows"),
+        # the model said refunded, nothing anywhere says so
+        (facts(provider_refunds={"pay_b": ()}), Decision.REJECT, "no refund exists"),
+        (facts(provider_refunds={"pay_b": ("failed",)}), Decision.REJECT, "no refund exists"),
+        # nobody could look, so nobody can say
+        (facts(), Decision.ESCALATE, "can't confirm"),
+    ],
+)
+def test_an_already_refunded_claim_is_checked_like_money(f, decision, why):
+    v = validate(refunded_claim(), f)
+    assert v.decision is decision and any(why in r for r in v.reasons), v.reasons
+
+
+def test_an_already_refunded_claim_has_to_name_a_payment_here():
+    v = validate(refunded_claim(payment_id="pay_elsewhere"), facts(provider_refunds={"pay_elsewhere": ("succeeded",)}))
+    assert v.decision is Decision.REJECT

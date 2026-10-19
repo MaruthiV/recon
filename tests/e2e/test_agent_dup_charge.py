@@ -157,6 +157,7 @@ async def test_plan_without_any_evidence_reads_is_not_accepted(aw):
         "case_version": 1,
         "customer_id": "?",
         "order_id": None,
+        "order_lookup": "no_order",
         "customer_request": "?",
         "payments": [],
         "duplicate_payment_ids": [],

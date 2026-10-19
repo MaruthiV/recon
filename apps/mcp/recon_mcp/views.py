@@ -135,6 +135,7 @@ class PolicySearch(BaseModel):
     query: str
     applicable_policy_ids: list[str]
     hits: list[PolicySection]
+    retrieval: str = "lexical"  # hybrid | lexical | lexical_fallback, so traces show what ran
 
 
 class QuoteView(BaseModel):
@@ -146,3 +147,4 @@ class QuoteView(BaseModel):
     entitlement_ref: str | None
     claim_id: str | None
     terms_policy_id: str | None
+    evidence_refs: list[str] = []  # copy these into the plan as they are

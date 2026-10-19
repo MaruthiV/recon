@@ -110,7 +110,34 @@ def terms_sections(t: Terms) -> tuple[tuple[str, str, str], ...]:
             else "Subscriptions are not refunded after the period starts.",
         )
     )
-    return tuple(out)
+    return (*out, *DISTRACTORS)
+
+
+# real policies have sections no workflow needs, retrieval has to pick past them
+DISTRACTORS = (
+    (
+        "method",
+        "Refund method",
+        "Refunds go back to the original payment method. Banks can take 5 to 10 business days to show them.",
+    ),
+    (
+        "exchanges",
+        "Exchanges",
+        "Items can be swapped for another size or colour while stock lasts. An exchange is not a refund.",
+    ),
+    ("gift_cards", "Gift cards", "Gift cards and store credit can't be refunded or turned into cash."),
+    (
+        "disputes",
+        "Card disputes",
+        "If a charge is disputed with the bank, refunds on it are paused until the dispute is settled.",
+    ),
+    (
+        "damaged",
+        "Damaged items",
+        "Report a damaged or faulty item within 7 days with a photo. We send a replacement first.",
+    ),
+    ("price_drops", "Price drops", "We don't refund the difference if an item goes on sale after you buy it."),
+)
 
 
 def limit_sections(limit: int) -> tuple[tuple[str, str, str], ...]:

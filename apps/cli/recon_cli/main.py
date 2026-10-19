@@ -25,6 +25,8 @@ from recon_domain.connector import SystemClock
 from recon_fixtures.dup_charge import seed_duplicate_charge, seeded_ids
 from recon_mcp.server import create_app as create_mcp_app
 from recon_provider.http import HttpConnector, HttpRefundReader
+from recon_retrieval.embed import embedder_from_env
+from recon_retrieval.index import index_from_env
 from recon_storage.db import DbNames, make_engine, new_id, sessions, url
 from recon_worker.executor import Executor
 from recon_worker.investigate import AgentConfig, Investigator, resolve_case
@@ -59,10 +61,23 @@ async def seed(args: argparse.Namespace) -> None:
                 tenant=args.tenant,
                 ids=seeded_ids(args.seed) if args.seed else new_id,
             )
+        indexed = await index_from_env(sessions(app_engine))
     finally:
         await app_engine.dispose()
         await eval_engine.dispose()
-    print(json.dumps({"tenant_id": sd.tenant_id, "case_id": sd.case_id}))
+    print(json.dumps({"tenant_id": sd.tenant_id, "case_id": sd.case_id, "indexed_chunks": indexed}))
+
+
+async def reindex() -> int:
+    if embedder_from_env() is None:
+        print("set RECON_EMBED_MODEL (e.g. nomic-embed-text) to index policy chunks")
+        return 2
+    engine = make_engine(url("recon_app", NAMES.recon))
+    try:
+        print(json.dumps({"indexed_chunks": await index_from_env(sessions(engine))}))
+    finally:
+        await engine.dispose()
+    return 0
 
 
 def live_allowed() -> bool:
@@ -196,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("dev", help="local stack: sim, mcp-read, mcp-exec, worker (auto-restart), api, web")
     v.add_argument("--agent", help="live:<model> (needs RECON_LIVE=1) or replay:<tape>")
     v.add_argument("--no-web", action="store_true")
+    sub.add_parser("index", help="embed policy chunks for hybrid search (needs RECON_EMBED_MODEL)")
     d = sub.add_parser("demo", help="spec §25 demo, no model calls")
     d.add_argument("scenario", choices=["dup-charge"])
     d.add_argument("--fault", choices=["FP4"], default="FP4")
@@ -203,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "seed":
         asyncio.run(seed(args))
         return 0
+    if args.cmd == "index":
+        return asyncio.run(reindex())
     if args.cmd == "resume":
         return asyncio.run(resume(args))
     if args.cmd == "dev":

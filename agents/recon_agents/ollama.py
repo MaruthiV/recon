@@ -75,6 +75,8 @@ class OllamaLlm(BaseLlm):
 
     base_url: str = os.environ.get("RECON_OLLAMA_URL", "http://127.0.0.1:11434")
     num_ctx: int = 16384
+    # the longest real answer (payment facts) is ~500 tokens, a looping or whitespace-padding decode stops here
+    max_output: int = 1024
     timeout_s: int = 600
     # thinking models (qwen3) reason before answering, slow on a laptop, so off unless asked for
     think: bool = os.environ.get("RECON_LOCAL_THINK") == "1"
@@ -89,7 +91,7 @@ class OllamaLlm(BaseLlm):
             "stream": False,
             "think": self.think,
             # deterministic enough to compare runs, and room for the ~9k token prompts
-            "options": {"temperature": 0, "seed": 7, "num_ctx": self.num_ctx},
+            "options": {"temperature": 0, "seed": 7, "num_ctx": self.num_ctx, "num_predict": self.max_output},
         }
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout_s) as c:
             r = await c.post("/api/chat", json=body)

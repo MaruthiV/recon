@@ -8,6 +8,7 @@ PKGS = {
     "recon_domain": "packages/domain/recon_domain",
     "recon_storage": "packages/storage/recon_storage",
     "recon_provider": "packages/provider/recon_provider",
+    "recon_retrieval": "packages/retrieval/recon_retrieval",
     "provider_sim": "apps/provider_sim/provider_sim",
     "recon_worker": "apps/worker/recon_worker",
     "recon_mcp": "apps/mcp/recon_mcp",
@@ -19,6 +20,7 @@ PKGS = {
 # who may not import whom
 FORBIDDEN = {
     "provider_sim": {
+        "recon_retrieval",
         "recon_domain",
         "recon_storage",
         "recon_worker",
@@ -28,6 +30,7 @@ FORBIDDEN = {
         "recon_fixtures",
     },
     "recon_verifier": {
+        "recon_retrieval",
         "recon_domain",
         "recon_storage",
         "recon_worker",
@@ -37,6 +40,7 @@ FORBIDDEN = {
         "recon_fixtures",
     },
     "recon_domain": {
+        "recon_retrieval",
         "recon_storage",
         "recon_worker",
         "recon_mcp",
@@ -70,6 +74,21 @@ FORBIDDEN = {
         "recon_fixtures",
         "sqlalchemy",
     },
+    # retrieval knows the policy tables and an embedding server, nothing about money or agents
+    "recon_retrieval": {
+        "recon_domain",
+        "recon_storage",
+        "recon_provider",
+        "recon_worker",
+        "recon_mcp",
+        "recon_api",
+        "recon_agents",
+        "provider_sim",
+        "recon_verifier",
+        "recon_fixtures",
+        "fastapi",
+        "google",
+    },
     # the api starts work and reads state, it never talks to the provider, the agents or the graders
     "recon_api": {
         "provider_sim",
@@ -84,6 +103,7 @@ FORBIDDEN = {
     "recon_mcp": {"recon_worker", "recon_agents", "provider_sim", "recon_verifier", "recon_fixtures", "google"},
     # agents only see tools, never the db or the money path
     "recon_agents": {
+        "recon_retrieval",
         "recon_storage",
         "recon_worker",
         "recon_mcp",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Computed,
     DateTime,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     MetaData,
@@ -30,6 +32,7 @@ NAMING = {
 }
 
 Ts = DateTime(timezone=True)
+EMBED_DIM = 768  # nomic-embed-text, another model size needs a migration
 
 
 class Base(DeclarativeBase):
@@ -225,6 +228,9 @@ class PolicyChunk(Base):
     tsv: Mapped[str] = mapped_column(
         TSVECTOR, Computed("to_tsvector('english', heading || ' ' || text)", persisted=True)
     )
+    # filled by recon_retrieval.index, never loaded through the orm
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM), deferred=True)
+    embedding_model: Mapped[str | None]
     __table_args__ = (
         UniqueConstraint("policy_document_id", "section_id"),
         ForeignKeyConstraint(
@@ -291,6 +297,7 @@ class Run(Base):
     generation: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+    seq: Mapped[int] = mapped_column(BigInteger, Identity())
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
@@ -379,6 +386,7 @@ class Plan(Base):
     decision: Mapped[str]
     verdict: Mapped[dict[str, Any]]
     created_at: Mapped[datetime]
+    seq: Mapped[int] = mapped_column(BigInteger, Identity())  # insert order, "latest plan" can't tie
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
@@ -403,10 +411,12 @@ class Approval(Base):
     decision: Mapped[str]  # APPROVED | REJECTED
     expires_at: Mapped[datetime]
     created_at: Mapped[datetime]
+    # insert order, timestamps can tie and the newest decision has to win
+    seq: Mapped[int] = mapped_column(BigInteger, Identity())
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         # several per plan is fine (an expired yes, then a fresh one), prepare uses the newest
-        Index("ix_approvals_plan", "tenant_id", "plan_id", "created_at"),
+        Index("ix_approvals_plan", "tenant_id", "plan_id", "seq"),
         ForeignKeyConstraint(["tenant_id", "case_id"], ["cases.tenant_id", "cases.id"]),
         ForeignKeyConstraint(["tenant_id", "plan_id"], ["plans.tenant_id", "plans.id"]),
     )
@@ -500,5 +510,18 @@ class AuditEvent(Base):
     actor: Mapped[str]
     kind: Mapped[str]
     data: Mapped[dict[str, Any]]
+    created_at: Mapped[datetime]
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),)
+
+
+# one row per client Idempotency-Key, a retried write gets the first answer back
+class ApiRequest(Base):
+    __tablename__ = "api_requests"
+    tenant_id: Mapped[str] = mapped_column(String, primary_key=True)
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    route: Mapped[str]
+    request_hash: Mapped[str]
+    status_code: Mapped[int | None]
+    response: Mapped[dict[str, Any] | None]
     created_at: Mapped[datetime]
     __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),)

@@ -1,6 +1,7 @@
 from datetime import date
 
 import pytest
+from google.adk.models.base_llm import BaseLlm
 
 import recon_agents.workflow as wf
 from recon_agents.meter import Price, Pricing, UnpricedModel, Usage
@@ -41,3 +42,12 @@ def test_workflow_version_tracks_prompts_and_models(monkeypatch):
     original = wf.prompt
     monkeypatch.setattr(wf, "prompt", lambda role: original(role) + " ")
     assert base != wf.workflow_version(models)
+
+
+def test_a_prompt_variant_from_outside_the_repo_changes_the_version(monkeypatch, tmp_path):
+    models: dict[str, BaseLlm | str] = dict.fromkeys(ROLES, "gemini-3.8-flash")
+    base = wf.workflow_version(models)
+    for role in ROLES:
+        (tmp_path / f"{role}.txt").write_text(wf.prompt(role) + "\nBe brief.")
+    monkeypatch.setenv("RECON_PROMPTS_DIR", str(tmp_path))
+    assert wf.workflow_version(models) != base

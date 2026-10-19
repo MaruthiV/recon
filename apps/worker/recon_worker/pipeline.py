@@ -16,7 +16,7 @@ from recon_domain.plan import ResolutionPlan
 from recon_domain.states import CaseState as S
 from recon_domain.states import CommandState as C
 from recon_domain.validation import Decision, Verdict
-from recon_storage.models import Approval, Command, OutboxEvent, Plan, Run
+from recon_storage.models import Approval, AuditEvent, Case, CaseMessage, Command, Order, OutboxEvent, Plan, Run
 from recon_storage.repos import NotFound, audit, get_case, move_case, new_id
 
 from .executor import Executor
@@ -34,6 +34,8 @@ class Stage(StrEnum):
 
 
 UNRESOLVED = (C.UNKNOWN, C.PENDING_PROVIDER, C.SUBMITTING)
+MAX_REINVESTIGATIONS = 1  # per customer reply: a stale plan gets one fresh look, then a person
+STARTABLE = (S.OPEN.value, S.AWAITING_INFO.value)
 
 
 class StaleLease(Exception):
@@ -72,6 +74,7 @@ class Step:
     command_id: str | None = None
     owns_command: bool | None = None
     counts_as_round: bool = False
+    seen: dict[str, tuple[str, ...]] | None = None  # provider read behind an "already refunded" plan
 
 
 def worker_identity() -> str:
@@ -115,15 +118,15 @@ class Pipeline:
             )
         )
 
-    async def start_agent(self, tenant_id: str, case_id: str) -> str:
+    async def start_agent(self, tenant_id: str, case_id: str, expected_version: int | None = None) -> str:
         # just queue it, the worker that runs INVESTIGATE stamps its own workflow version and models
         now = self.clock.now()
         run_id = new_id("run")
         async with self.sessions() as s, s.begin():
-            case = await get_case(s, tenant_id, case_id)
-            if case.state != S.OPEN.value:
+            case = await self._locked_case(s, tenant_id, case_id, expected_version)
+            if case.state not in STARTABLE:
                 raise NotStartable(f"case {case_id} is {case.state}")
-            await move_case(s, tenant_id, case_id, S.OPEN, S.INVESTIGATING, now)
+            await move_case(s, tenant_id, case_id, S(case.state), S.INVESTIGATING, now)
             s.add(
                 Run(
                     id=run_id,
@@ -146,6 +149,7 @@ class Pipeline:
     async def start_scripted(self, tenant_id: str, case_id: str, plan: ResolutionPlan, source: str = "scripted") -> str:
         now = self.clock.now()
         run_id = new_id("run")
+        seen = await self.executor.observe(tenant_id, case_id, plan)
         async with self.sessions() as s, s.begin():
             s.add(
                 Run(
@@ -162,10 +166,91 @@ class Pipeline:
                 )
             )
             await s.flush()
-            plan_id, _ = await self.executor.record_plan_in(s, tenant_id, case_id, plan, source, run_id)
+            plan_id, _ = await self.executor.record_plan_in(s, tenant_id, case_id, plan, source, run_id, seen)
             await s.execute(update(Run).where(Run.id == run_id).values(plan_id=plan_id))
             self._enqueue(s, tenant_id, run_id, Stage.PREPARE, 0)
         return run_id
+
+    async def _locked_case(self, s: AsyncSession, tenant_id: str, case_id: str, expected_version: int | None) -> Case:
+        case = (
+            await s.execute(
+                select(Case)
+                .where(Case.tenant_id == tenant_id, Case.id == case_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if case is None:
+            raise NotStartable("no such case")
+        # the caller acted on what it saw, if the case moved on since then it has to look again
+        if expected_version is not None and case.version != expected_version:
+            raise NotStartable(f"case changed since v{expected_version}, it's v{case.version} now")
+        return case
+
+    async def add_message(
+        self,
+        tenant_id: str,
+        case_id: str,
+        body: str,
+        order_id: str | None = None,
+        author: str = "customer",
+        expected_version: int | None = None,
+    ) -> S:
+        """a customer reply is new evidence: it bumps the case version, so any plan made before it goes stale"""
+        now = self.clock.now()
+        async with self.sessions() as s, s.begin():
+            case = await self._locked_case(s, tenant_id, case_id, expected_version)
+            if case.state == S.CLOSED.value:
+                raise NotStartable("case is closed")
+            if order_id is not None and order_id != case.order_id:
+                if case.order_id is not None:
+                    raise NotStartable(f"case already has order {case.order_id}")
+                # only an order this customer actually has, same answer for missing and someone else's
+                owned = (
+                    await s.execute(
+                        select(Order.id).where(
+                            Order.tenant_id == tenant_id, Order.id == order_id, Order.customer_id == case.customer_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if owned is None:
+                    raise NotStartable("no such order for this customer")
+                case.order_id = order_id
+            s.add(
+                CaseMessage(
+                    id=new_id("msg"), tenant_id=tenant_id, case_id=case_id, author=author, body=body, created_at=now
+                )
+            )
+            case.version += 1
+            case.updated_at = now
+            audit(
+                s, tenant_id, "customer_replied", now, case_id=case_id, case_version=case.version, linked_order=order_id
+            )
+            return S(case.state)
+
+    async def requeue_dead(self, tenant_id: str, outbox_id: int, actor: str) -> str:
+        # a person fixed whatever kept failing, the same event goes round again (stages are fenced, so that's safe)
+        now = self.clock.now()
+        async with self.sessions() as s, s.begin():
+            ev = (
+                await s.execute(
+                    select(OutboxEvent)
+                    .where(OutboxEvent.tenant_id == tenant_id, OutboxEvent.id == outbox_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if ev is None:
+                raise NotStartable("no such event")
+            if ev.dead_at is None:
+                raise NotStartable("event isn't dead-lettered")
+            run_case = (await s.execute(select(Run.case_id).where(Run.id == ev.run_id))).scalar_one()
+            await s.execute(
+                update(OutboxEvent)
+                .where(OutboxEvent.id == outbox_id)
+                .values(dead_at=None, attempts=0, available_at=func.now(), last_error=None)
+            )
+            audit(s, tenant_id, "outbox_requeued", now, case_id=run_case, actor=actor, event_id=ev.event_id)
+            return ev.event_id
 
     async def approve(
         self,
@@ -190,7 +275,7 @@ class Pipeline:
                 await s.execute(
                     select(Plan.id)
                     .where(Plan.tenant_id == tenant_id, Plan.case_id == row.case_id)
-                    .order_by(Plan.created_at.desc())
+                    .order_by(Plan.seq.desc())
                     .limit(1)
                 )
             ).scalar_one()
@@ -265,7 +350,7 @@ class Pipeline:
                 await s.execute(
                     select(Approval)
                     .where(Approval.tenant_id == tenant_id, Approval.plan_id == plan_id)
-                    .order_by(Approval.created_at.desc(), Approval.id.desc())
+                    .order_by(Approval.seq.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
@@ -375,7 +460,7 @@ class Pipeline:
             if step.plan is not None:
                 # the plan is persisted iff the stage advance commits (D6 guard)
                 plan_id, _ = await self.executor.record_plan_in(
-                    s, claim.tenant_id, claim.case_id, step.plan, "agent", claim.run_id
+                    s, claim.tenant_id, claim.case_id, step.plan, "agent", claim.run_id, step.seen
                 )
                 await s.execute(update(Run).where(Run.id == claim.run_id).values(plan_id=plan_id))
             if step.next is not Stage.DONE:
@@ -415,7 +500,8 @@ class Pipeline:
             return Step(Stage.DONE)
         if inv.plan is None:
             return Step(Stage.DONE)  # investigator already escalated the case
-        return Step(Stage.PREPARE, plan=inv.plan)
+        seen = await self.executor.observe(claim.tenant_id, claim.case_id, inv.plan)
+        return Step(Stage.PREPARE, plan=inv.plan, seen=seen)
 
     async def _prepare(self, claim: Claim) -> Step:
         async with self.sessions() as s:
@@ -426,19 +512,78 @@ class Pipeline:
             approval = await self._approval(claim.tenant_id, row.id)
         if row.decision != Decision.AUTHORIZE.value and approval is None:
             verdict = Verdict(Decision(row.decision), tuple(row.verdict.get("reasons", ())))
-            await self.executor._not_executed(claim.tenant_id, claim.case_id, plan, verdict)
-            return Step(Stage.DONE)
+            return await self._not_executed(claim, row, plan, verdict)
         # prepare re-validates on fresh facts and only takes the approval if it still covers this exact plan
         prepared = await self.ledger.prepare(claim.tenant_id, claim.case_id, row.id, plan, approval)
         if prepared.command_id is None:
-            await self.executor._not_executed(claim.tenant_id, claim.case_id, plan, prepared.verdict)
-            return Step(Stage.DONE)
+            return await self._not_executed(claim, row, plan, prepared.verdict)
         async with self.sessions() as s:
             cmd = (await s.execute(select(Command).where(Command.id == prepared.command_id))).scalar_one()
         # a redelivered prepare converges on our own command, another ticket's command isn't ours to drive
         owns = cmd.plan_id == row.id
         await self.executor._move(claim.tenant_id, claim.case_id, S.EXECUTING, command_id=cmd.id)
         return Step(Stage.SUBMIT, command_id=cmd.id, owns_command=owns)
+
+    async def _not_executed(self, claim: Claim, row: Plan, plan: ResolutionPlan, verdict: Verdict) -> Step:
+        if verdict.decision is Decision.STALE:
+            verdict = await self._reinvestigate(claim, row, verdict)
+        await self.executor._not_executed(claim.tenant_id, claim.case_id, plan, verdict)
+        return Step(Stage.DONE)
+
+    async def _reinvestigate(self, claim: Claim, row: Plan, verdict: Verdict) -> Verdict:
+        # facts moved under the plan: queue a fresh agent run, or hand it to a person if that already happened
+        async with self.sessions() as s, s.begin():
+            # audit ids only go up, so "since the last reply" holds even when timestamps tie
+            last_reply = (
+                select(func.coalesce(func.max(AuditEvent.id), 0))
+                .where(
+                    AuditEvent.tenant_id == claim.tenant_id,
+                    AuditEvent.case_id == claim.case_id,
+                    AuditEvent.kind == "customer_replied",
+                )
+                .scalar_subquery()
+            )
+            done = (
+                await s.execute(
+                    select(func.count()).where(
+                        AuditEvent.tenant_id == claim.tenant_id,
+                        AuditEvent.case_id == claim.case_id,
+                        AuditEvent.kind == "reinvestigation_queued",
+                        AuditEvent.id > last_reply,
+                    )
+                )
+            ).scalar_one()
+            if row.source != "agent" or self.investigator is None or done >= MAX_REINVESTIGATIONS:
+                why = "plan went stale and there's no fresh investigation left to run"
+                return Verdict(Decision.ESCALATE, (*verdict.reasons, why))
+            now = self.clock.now()
+            run_id = new_id("run")
+            s.add(
+                Run(
+                    id=run_id,
+                    tenant_id=claim.tenant_id,
+                    case_id=claim.case_id,
+                    stage=Stage.INVESTIGATE.value,
+                    investigation="QUEUED",
+                    workflow_version="pending",
+                    models={},
+                    budget={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await s.flush()
+            audit(
+                s,
+                claim.tenant_id,
+                "reinvestigation_queued",
+                now,
+                case_id=claim.case_id,
+                run_id=run_id,
+                after=claim.run_id,
+            )
+            self._enqueue(s, claim.tenant_id, run_id, Stage.INVESTIGATE, 0)
+        return verdict
 
     async def _command_state(self, command_id: str) -> C:
         async with self.sessions() as s:

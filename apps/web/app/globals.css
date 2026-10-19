@@ -41,7 +41,7 @@ button.primary { background: var(--accent); color: white; border-color: var(--ac
 button.danger { border-color: var(--bad); color: var(--bad); }
 button:disabled { opacity: 0.5; cursor: default; }
 select { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; width: 100%; }
-input { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; width: 100%; box-sizing: border-box; }
+input, textarea { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; width: 100%; box-sizing: border-box; }
 .timeline { list-style: none; margin: 0; padding: 0; }
 .timeline li { padding: 8px 0; border-bottom: 1px dashed var(--line); font-size: 14px; }
 .timeline .at { color: var(--muted); font-size: 12px; margin-right: 8px; }

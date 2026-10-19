@@ -1,20 +1,39 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
-import { api, type CaseRow, money, NotSignedIn, when } from "@/lib/api";
+import { api, type CaseRow, type DeadLetter, money, NotSignedIn, when } from "@/lib/api";
 
 export default function Inbox() {
   const router = useRouter();
   const [cases, setCases] = useState<CaseRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [dead, setDead] = useState<DeadLetter[]>([]);
+
+  const loadDead = useCallback(() => {
+    // supervisors only, everyone else gets a 403 and simply sees nothing
+    api<DeadLetter[]>("/v1/ops/dead-letters")
+      .then(setDead)
+      .catch(() => setDead([]));
+  }, []);
+
   useEffect(() => {
     api<CaseRow[]>("/v1/cases")
       .then(setCases)
       .catch((e) => (e instanceof NotSignedIn ? router.push("/login") : setError(String(e))));
-  }, [router]);
+    loadDead();
+  }, [router, loadDead]);
+
+  async function requeue(id: number) {
+    try {
+      await api(`/v1/ops/dead-letters/${id}/requeue`, { method: "POST", body: "{}" });
+      loadDead();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   return (
     <>
@@ -59,6 +78,42 @@ export default function Inbox() {
           </tbody>
         </table>
       </div>
+      {dead.length > 0 && (
+        <div className="panel">
+          <h2>Stuck work</h2>
+          <p className="muted">Stages the dispatcher gave up on. Fix the cause, then send them round again.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Stage</th>
+                <th>Tries</th>
+                <th>Last error</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {dead.map((d) => (
+                <tr key={d.id}>
+                  <td>
+                    <a href={`/cases/${d.case_id}`}>
+                      <code>{d.case_id}</code>
+                    </a>
+                  </td>
+                  <td>{d.stage}</td>
+                  <td className="num">{d.attempts}</td>
+                  <td>
+                    <code>{d.last_error}</code>
+                  </td>
+                  <td>
+                    <button onClick={() => requeue(d.id)}>Requeue</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </>
   );
 }

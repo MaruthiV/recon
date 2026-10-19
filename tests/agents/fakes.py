@@ -89,6 +89,7 @@ def investigator(req: LlmRequest) -> list[types.Part]:
                 "case_version": case["case_version"],
                 "customer_id": case["customer_id"],
                 "order_id": case["order_id"],
+                "order_lookup": "found",
                 "customer_request": case["messages"][0]["body"],
                 "payments": observed,
                 "duplicate_payment_ids": dups,
