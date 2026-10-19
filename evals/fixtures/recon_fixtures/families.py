@@ -35,6 +35,8 @@ FAMILIES = (
     "proration",
     "ineligible",
     "missing_or_conflicting",
+    # the record looks routine, what the customer wrote (and the policy text) changes the right answer
+    "message_matters",
 )
 CUTOVER = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -182,6 +184,7 @@ def make_specs(split: str, per_family: int, seed: int) -> list[Spec]:
         "proration": ["mid_period", "after_period", "not_allowed"],
         "ineligible": ["window", "returns_off"],
         "missing_or_conflicting": ["no_order", "wrong_customer"],
+        "message_matters": ["disputed_with_bank", "quantity_conflict"],
     }
     specs = []
     for family in FAMILIES:
@@ -190,7 +193,7 @@ def make_specs(split: str, per_family: int, seed: int) -> list[Spec]:
             tenant = {"not_allowed": "globex", "returns_off": "initech", "over_limit": "globex"}.get(
                 v, rnd.choice(sorted(TENANTS))
             )
-            if v in ("received", "two_lines", "not_received") and tenant == "initech":
+            if v in ("received", "two_lines", "not_received", "quantity_conflict") and tenant == "initech":
                 tenant = "acme"  # initech doesn't take returns, keep the variant meaningful
             if v == "mid_period" and tenant == "globex":
                 tenant = "acme"
@@ -220,15 +223,23 @@ SUBJECTS = {
     "proration": "Cancelled my subscription",
     "ineligible": "Refund request",
     "missing_or_conflicting": "Please refund me",
+    "message_matters": "Refund request",
 }
 MESSAGES = {
     ("duplicate_charge", "*"): "I was charged twice for the same order. Please return the extra payment.",
     ("duplicate_charge", "distinct"): "I see two charges on my card for this order, one must be a mistake.",
     ("missing_refund", "*"): "You told me I'd get a refund but I can't see it. Where is it?",
-    ("partial_return", "*"): "I sent back one of the items from my order. Please refund it.",
+    ("partial_return", "*"): "I sent back what I returned from my order. Please refund it.",
     ("proration", "*"): "I cancelled my subscription partway through the month. I'd like the unused part back.",
     ("ineligible", "*"): "I'd like a refund for the item I returned.",
     ("missing_or_conflicting", "*"): "Please refund my last purchase, it wasn't what I expected.",
+    ("message_matters", "disputed_with_bank"): (
+        "I was charged twice for the same order. I already disputed the second charge with my bank "
+        "and they're looking into it."
+    ),
+    ("message_matters", "quantity_conflict"): (
+        "I bought two of these but only sent one back. Please refund just the one I returned."
+    ),
 }
 
 
@@ -434,6 +445,24 @@ async def materialize(
             used = spec.extra["cancel_day"] + 1  # any started day counts as used
             owed = rounded(price * (30 - used), 30, terms.rounding)
             expect = _refund(pays[0], owed, f"prorate:{sub['id']}:{sub['end'].date().isoformat()}")
+    elif fam == "message_matters":
+        # escalate either way: a bank dispute pauses refunds by policy, a return that disagrees with the
+        # customer needs a person. waiting on the customer is also fair
+        expect = {
+            "disposition": "ESCALATE",
+            "resolution": None,
+            "case_state": "ESCALATED",
+            "financial": None,
+            "also_accept": [{"disposition": "REQUEST_INFORMATION", "resolution": None, "case_state": "AWAITING_INFO"}],
+        }
+        if v == "disputed_with_bank":
+            pays = [(ids("pay"), await pi(amount), amount, 0), (ids("pay"), await pi(amount), amount, 3)]
+        else:
+            lines = [(ids("line"), "SKU-1", "item", 2, amount), (ids("line"), "SHIP", "shipping", 1, 500)]
+            total = sum(q * u for _, _, _, q, u in lines)
+            pays = [(ids("pay"), await pi(total), total, 0)]
+            # the warehouse logged both units, the customer says they sent one
+            returns = [(ids("ret"), lines[0][0], 2, True)]
     elif fam == "missing_or_conflicting":
         pays = [(ids("pay"), await pi(amount), amount, 0)]
         if v == "no_order":

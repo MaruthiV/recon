@@ -58,6 +58,12 @@ class Money:
         self._same(other)
         return self.amount_minor >= other.amount_minor
 
+    def display(self) -> str:
+        # 4900 usd -> "49.00 USD", integer math only
+        sign = "-" if self.amount_minor < 0 else ""
+        whole, cents = divmod(abs(self.amount_minor), 100)
+        return f"{sign}{whole}.{cents:02d} {self.currency.value.upper()}"
+
     def is_positive(self) -> bool:
         return self.amount_minor > 0
 

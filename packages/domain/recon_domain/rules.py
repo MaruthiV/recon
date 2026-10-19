@@ -52,7 +52,7 @@ def rules_plan(facts: CaseFacts) -> ResolutionPlan:
                 policy_version_ids=policy_ids,
                 evidence_refs=refs,
                 reason_code=reason,
-                explanation=f"Refunding {q.amount.amount_minor} {q.amount.currency.value} for {what}.",
+                explanation=f"Refunding {q.amount.display()} for {what}.",
             )
         if q.reasons and q.reasons[0].startswith("nothing left"):
             return no_money(

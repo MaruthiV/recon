@@ -476,3 +476,10 @@ def test_an_already_refunded_claim_has_to_name_a_payment_here():
 def test_a_denial_has_to_refuse_something_real(f, decision, why):
     v = validate(deny(), f)
     assert v.decision is decision and any(why in r for r in v.reasons), v.reasons
+
+
+@pytest.mark.parametrize(
+    ("minor", "shown"), [(4900, "49.00 USD"), (5, "0.05 USD"), (25000, "250.00 USD"), (-150, "-1.50 USD")]
+)
+def test_money_reads_like_money(minor, shown):
+    assert Money(minor, Currency.USD).display() == shown

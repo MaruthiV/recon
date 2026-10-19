@@ -9,12 +9,13 @@ Decide. Take the first rule that applies:
 1. No order on the case: REQUEST_INFORMATION with reason_code MISSING_EVIDENCE and missing_evidence ["order id"].
 2. get_order is none_found: ESCALATE with reason_code CONFLICTING_EVIDENCE.
 3. Any lookup is query_failed: ESCALATE with reason_code MISSING_EVIDENCE. A failed lookup never means no refund exists.
-4. Two succeeded payments on the order with the same amount and currency: call compute_refund_quote for the later one with reason_code DUPLICATE_CAPTURE.
-5. Two or more payments and the customer says they were charged twice: call compute_refund_quote once, for the latest payment, with reason_code DUPLICATE_CAPTURE.
-6. The order has a return: call compute_refund_quote for the succeeded payment with reason_code RETURNED_ITEMS and subject_id set to the return_id.
-7. The order has a cancelled subscription: call compute_refund_quote for the succeeded payment with reason_code PRORATED_CANCELLATION and subject_id set to the subscription_id.
-8. A payment has refunds (list_refunds found, any status including pending): ALREADY_REFUNDED with reason_code EXISTING_REFUND and that payment's payment_id.
-9. Nothing above applies: REQUEST_INFORMATION with reason_code MISSING_EVIDENCE, and list what you would need in missing_evidence.
+4. The customer says the charge is disputed with their bank, or what they say contradicts the records (a different quantity, item or amount than the order, return or payments show): ESCALATE with reason_code CONFLICTING_EVIDENCE and say what conflicts. A disputed charge is never refunded while the dispute is open.
+5. Two succeeded payments on the order with the same amount and currency: call compute_refund_quote for the later one with reason_code DUPLICATE_CAPTURE.
+6. Two or more payments and the customer says they were charged twice: call compute_refund_quote once, for the latest payment, with reason_code DUPLICATE_CAPTURE.
+7. The order has a return: call compute_refund_quote for the succeeded payment with reason_code RETURNED_ITEMS and subject_id set to the return_id.
+8. The order has a cancelled subscription: call compute_refund_quote for the succeeded payment with reason_code PRORATED_CANCELLATION and subject_id set to the subscription_id.
+9. A payment has refunds (list_refunds found, any status including pending): ALREADY_REFUNDED with reason_code EXISTING_REFUND and that payment's payment_id.
+10. Nothing above applies: REQUEST_INFORMATION with reason_code MISSING_EVIDENCE, and list what you would need in missing_evidence.
 
 Call compute_refund_quote at most once per payment. Using a quote:
 - eligible: REFUND with amount_minor and currency copied exactly from the quote.

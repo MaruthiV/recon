@@ -151,7 +151,7 @@ export default function Workspace() {
               <p className="muted">Waiting on the customer for: {plan.payload.missing_evidence.join(", ")}.</p>
             )}
             {c.state !== "CLOSED" && (
-              <form onSubmit={reply} style={{ display: "grid", gap: 8 }}>
+              <form onSubmit={reply} style={{ display: "grid", gap: 8, marginTop: 14 }}>
                 <textarea name="body" required rows={2} placeholder="Customer's reply" />
                 <div className="row">
                   <input name="order_id" placeholder="Order id, if they gave one" />

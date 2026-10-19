@@ -227,6 +227,23 @@ async def evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+async def naive(args: argparse.Namespace) -> int:
+    from recon_bench.naive import run_b3
+    from recon_bench.run import Arm
+    from recon_bench.world import world
+
+    if not args.model.startswith("ollama:") and not live_allowed():
+        print("refusing: gemini calls need RECON_LIVE=1 and GEMINI_API_KEY")
+        return 2
+    arm = Arm("single", args.model)
+    out = Path(args.out) / datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    async with world("bench_b3") as w:
+        summary = await run_b3(w, lambda: arm.inner("naive_agent"), out, args.instances)
+    print(json.dumps(summary, indent=2))
+    print(out)
+    return 0
+
+
 def _interrupt(*_: object) -> None:
     raise KeyboardInterrupt
 
@@ -263,6 +280,16 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--limit", type=int)
     ev.add_argument("--calls", type=int, default=10, help="model call budget per case")
     ev.add_argument("--out", default="results/eval")
+    b3 = sub.add_parser(
+        "b3", help="naive direct-tool agent under provider faults (no ledger), counts duplicate refunds"
+    )
+    b3.add_argument("--model", required=True, help="ollama:<tag>, a gemini id needs RECON_LIVE=1")
+    b3.add_argument("--instances", type=int, default=10)
+    b3.add_argument("--out", default="results/b3")
+    ch = sub.add_parser("charts", help="readme charts (svg) from result files")
+    ch.add_argument("--val", nargs="*", default=[], help="name=run_dir pairs, e.g. rules=results/eval/...")
+    ch.add_argument("--b3", help="a results/b3/<stamp> dir")
+    ch.add_argument("--out", default="assets")
     rp = sub.add_parser("report", help="aggregate eval runs, side by side")
     rp.add_argument("runs", nargs="+")
     rp.add_argument("--out")
@@ -277,6 +304,20 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(reindex())
     if args.cmd == "eval":
         return asyncio.run(evaluate(args))
+    if args.cmd == "charts":
+        from recon_bench.charts import from_results
+
+        runs = dict(pair.split("=", 1) for pair in args.val)
+        made = from_results(
+            Path("results"),
+            Path(args.out),
+            {k: Path(v) for k, v in runs.items()} or None,
+            Path(args.b3) if args.b3 else None,
+        )
+        print("\n".join(str(m) for m in made))
+        return 0
+    if args.cmd == "b3":
+        return asyncio.run(naive(args))
     if args.cmd == "report":
         from recon_bench.report import report
 

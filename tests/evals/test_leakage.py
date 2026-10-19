@@ -24,6 +24,8 @@ LABEL_ONLY = {
     "requires_approval",
     "also_accept",
     "preexisting_refunds",
+    "disputed_with_bank",
+    "quantity_conflict",
 }
 
 

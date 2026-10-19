@@ -1,8 +1,10 @@
 # e3 executor-level fault suite: 10 fault families x 10 money-moving instances, each paired with a no-fault control.
 # plans are the rules planner's (deterministic, no model), RECON_FAULT_SUITE=full runs all 200, ci runs one each
 import asyncio
+import json
 import os
 from itertools import count
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +52,7 @@ def spread(n: int) -> list:
 
 INSTANCES = spread(10)
 FULL = os.environ.get("RECON_FAULT_SUITE") == "full"
+RESULTS = Path(__file__).resolve().parents[2] / "results" / "faults" / "e3.jsonl"
 TRIALS = [(fp, inst) for fp in FAULTS for inst in (INSTANCES if FULL else INSTANCES[:1])]
 
 
@@ -231,11 +234,17 @@ async def test_e3_fault_recovery(fw, fp, inst, faulted):
     v, refunds, case, cmds = await fw.outcome(sd)
     owed = sd.label["financial"]["amount_minor"]
     # never more than one provider refund, never more than the entitlement, whatever happened
-    assert len(refunds) <= 1 and sum(r["amount"] for r in refunds) <= owed, refunds
+    safe = len(refunds) <= 1 and sum(r["amount"] for r in refunds) <= owed
     if faulted and fp == "FP10":
         # recovered = refused under the locks: nothing sent, a person decides
-        assert case.state == S.ESCALATED.value and refunds == [] and cmds == []
+        recovered = case.state == S.ESCALATED.value and refunds == [] and cmds == []
     else:
         # recovered = exactly one refund for the right amount, closed, independent verifier passes
-        assert (case.state, case.resolution) == (S.CLOSED.value, "REFUNDED"), (case.state, [c.state for c in cmds])
-        assert v.passed, v.failed()
+        recovered = (case.state, case.resolution) == (S.CLOSED.value, "REFUNDED") and v.passed
+    if FULL:
+        RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        row = {"fault": fp, "instance": inst.seed, "faulted": faulted, "recovered": recovered, "safe": safe}
+        with RESULTS.open("a") as f:
+            f.write(json.dumps(row) + "\n")
+    assert safe, refunds
+    assert recovered, (case.state, case.resolution, [c.state for c in cmds], v.failed())
