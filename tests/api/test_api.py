@@ -271,3 +271,43 @@ async def test_a_rules_already_refunded_close_starts_from_the_keyless_api(api, a
     await api.drain()
     detail = (await api.c.get(f"/v1/cases/{cid}")).json()
     assert (detail["case"]["state"], detail["case"]["resolution"]) == ("CLOSED", "ALREADY_REFUNDED")
+
+
+async def test_benchmarks_list_finished_runs_and_nothing_else(app_sessions, clock, tmp_path):
+    import json as _json
+
+    def run(name, report=True):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "manifest.json").write_text(_json.dumps({"started_at": f"2026-10-19T{name[-2:]}:00:00+00:00"}))
+        if report:
+            r = {
+                "split": "val",
+                "split_sha256": "abc",
+                "arm": "rules",
+                "model": None,
+                "n": 70,
+                "passed": 57,
+                "wrong_closes": 10,
+            }
+            (d / "report.json").write_text(_json.dumps(r))
+
+    run("run-01")
+    run("run-02")
+    run("run-03", report=False)  # still running, or killed
+    async with app_sessions() as s, s.begin():
+        await s.execute(
+            text(
+                "INSERT INTO tenants (id, name, provider_account, created_at) VALUES ('t_acme', 'Acme', 'acct_acme', now())"
+            )
+        )
+    app = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=False, results=tmp_path)
+    async with client(app) as c:
+        assert (await c.get("/v1/benchmarks")).status_code == 401
+        await login(c)
+        listed = (await c.get("/v1/benchmarks")).json()
+        assert [b["id"] for b in listed] == ["run-02", "run-01"] and listed[0]["passed"] == 57
+        detail = (await c.get("/v1/benchmarks/run-01")).json()
+        assert detail["report"]["n"] == 70 and "started_at" in detail["manifest"]
+        for bad in ("run-03", "..", "..%2F..%2Fetc", "nope"):
+            assert (await c.get(f"/v1/benchmarks/{bad}")).status_code == 404, bad

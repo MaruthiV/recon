@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -15,14 +16,46 @@ class ReplayDiverged(Exception):
     pass
 
 
+def structure(obj: Any, depth: int = 4) -> Any:
+    # field names all the way down, no values: a tool that grows or loses a field changes this
+    if depth == 0:
+        return "…"
+    if isinstance(obj, dict):
+        return {k: structure(v, depth - 1) for k, v in sorted(obj.items())}
+    if isinstance(obj, list):
+        return [structure(obj[0], depth - 1)] if obj else []
+    return type(obj).__name__
+
+
+def declarations(req: LlmRequest) -> str:
+    # exactly what the model is told about each tool: name, description, input schema
+    decls = [
+        d.model_dump(mode="json", exclude_none=True)
+        for t in ((req.config.tools if req.config else None) or [])
+        for d in (getattr(t, "function_declarations", None) or [])
+    ]
+    blob = json.dumps(sorted(decls, key=lambda d: d.get("name", "")), sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
 def shape(req: LlmRequest) -> dict[str, Any]:
-    # what the model was shown, minus the volatile bits (ids, timestamps)
-    responses = [p.function_response.name for c in req.contents for p in (c.parts or []) if p.function_response]
+    # what the model was shown, minus the volatile bits (ids, timestamps, values)
+    parts = [p for c in req.contents for p in (c.parts or [])]
+    responses = [p.function_response for p in parts if p.function_response]
     return {
         "contents": len(req.contents),
-        "function_responses": responses,
+        "function_responses": [r.name for r in responses],
         "tools": sorted((req.tools_dict or {}).keys()),
+        "tool_declarations": declarations(req),
+        "response_structure": [
+            [r.name, structure((r.response or {}).get("structuredContent", r.response))] for r in responses
+        ],
     }
+
+
+def same(now: dict[str, Any], recorded: dict[str, Any]) -> bool:
+    # a tape recorded before a field existed is only held to what it recorded
+    return all(now[k] == v for k, v in recorded.items() if k in now)
 
 
 class Tape:
@@ -78,7 +111,7 @@ class ReplayLlm(BaseLlm):
         turn = self.turns[self._cursor]
         self._cursor += 1
         now = shape(llm_request)
-        if now != turn["shape"]:
+        if not same(now, turn["shape"]):
             raise ReplayDiverged(f"{self.agent} turn {self._cursor}: request {now} != recorded {turn['shape']}")
         yield LlmResponse.model_validate(turn["response"])
 

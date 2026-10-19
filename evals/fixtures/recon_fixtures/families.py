@@ -195,8 +195,8 @@ def make_specs(split: str, per_family: int, seed: int) -> list[Spec]:
             )
             if v in ("received", "two_lines", "not_received", "quantity_conflict") and tenant == "initech":
                 tenant = "acme"  # initech doesn't take returns, keep the variant meaningful
-            if v == "mid_period" and tenant == "globex":
-                tenant = "acme"
+            if v in ("mid_period", "after_period") and tenant == "globex":
+                tenant = "acme"  # globex never prorates, which would hide what these variants test
             amount = rnd.choice([1900, 2500, 4900, 7400, 9900]) if v != "over_limit" else 8800
             window = min(t.window_days for t in TENANTS[tenant].terms)
             days = rnd.randint(2, window - 2) if v not in ("late", "window") else window + rnd.randint(70, 90)
@@ -229,7 +229,7 @@ MESSAGES = {
     ("duplicate_charge", "*"): "I was charged twice for the same order. Please return the extra payment.",
     ("duplicate_charge", "distinct"): "I see two charges on my card for this order, one must be a mistake.",
     ("missing_refund", "*"): "You told me I'd get a refund but I can't see it. Where is it?",
-    ("partial_return", "*"): "I sent back what I returned from my order. Please refund it.",
+    ("partial_return", "*"): "I returned part of my order. Please refund it.",
     ("proration", "*"): "I cancelled my subscription partway through the month. I'd like the unused part back.",
     ("ineligible", "*"): "I'd like a refund for the item I returned.",
     ("missing_or_conflicting", "*"): "Please refund my last purchase, it wasn't what I expected.",
@@ -405,6 +405,8 @@ async def materialize(
                 "case_state": "AWAITING_INFO",
                 "financial": None,
                 "expects_information": True,
+                # a refund promised by support only a person can check, so handing it to one is fair too (e1 audit)
+                "also_accept": [{"disposition": "ESCALATE", "resolution": None, "case_state": "ESCALATED"}],
             }
     elif fam in ("partial_return", "ineligible"):
         unit = amount

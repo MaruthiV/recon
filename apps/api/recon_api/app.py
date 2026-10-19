@@ -3,6 +3,7 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -109,7 +110,14 @@ def tenant_of(claims: Claims) -> str:
 TenantId = Annotated[str, Depends(tenant_of)]
 
 
-def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bool, faults_enabled: bool) -> FastAPI:
+def create_app(
+    db: async_sessionmaker,
+    clock: Clock,
+    session_key: bytes,
+    dev: bool,
+    faults_enabled: bool,
+    results: Path | None = None,
+) -> FastAPI:
     app = FastAPI(title="recon-api")
 
     async def once(request: Request, tenant: str, body: BaseModel, work: Callable[[], Awaitable[dict]]) -> JSONResponse:
@@ -530,6 +538,45 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
 
         return await once(request, tenant, body, work)
 
+    def runs() -> dict[str, Path]:
+        # finished eval runs only: a manifest and a report, looked up by name so no id becomes a path
+        if results is None or not results.is_dir():
+            return {}
+        return {
+            d.name: d for d in results.iterdir() if (d / "report.json").is_file() and (d / "manifest.json").is_file()
+        }
+
+    @app.get("/v1/benchmarks")
+    def benchmarks(_: Claims):
+        out = []
+        for name, d in sorted(runs().items(), reverse=True):
+            r = json.loads((d / "report.json").read_text())
+            m = json.loads((d / "manifest.json").read_text())
+            out.append(
+                {
+                    "id": name,
+                    "split": r["split"],
+                    "split_sha256": r["split_sha256"],
+                    "arm": r["arm"],
+                    "model": r["model"],
+                    "n": r["n"],
+                    "passed": r["passed"],
+                    "wrong_closes": r["wrong_closes"],
+                    "started_at": m["started_at"],
+                }
+            )
+        return out
+
+    @app.get("/v1/benchmarks/{run_id}")
+    def benchmark(run_id: str, _: Claims):
+        d = runs().get(run_id)
+        if d is None:
+            raise HTTPException(404, "no such benchmark run")
+        return {
+            "report": json.loads((d / "report.json").read_text()),
+            "manifest": json.loads((d / "manifest.json").read_text()),
+        }
+
     @app.post("/internal/demo/faults")
     async def arm(body: Arm, _: TenantId):
         # dev only, the public app has no way to reach the fault table
@@ -553,4 +600,5 @@ def create_from_env() -> FastAPI:
         os.environ.get("RECON_SESSION_KEY", "dev-session-key").encode(),
         dev=env != "public",
         faults_enabled=os.environ.get("RECON_FAULTS") == "1" and env != "public",
+        results=Path(os.environ.get("RECON_RESULTS_DIR", "results/eval")),
     )

@@ -159,7 +159,9 @@ async def verify_case(recon: AsyncEngine, sim: AsyncEngine, evals: AsyncEngine, 
             why = f"approvals on the executed plan: {[(a['amount_minor'], a['decision']) for a in apr]}"
         v.checks.append(Check("6_approval_info", ok, why))
     elif label.get("expects_information"):
-        v.checks.append(Check("6_approval_info", case["state"] == "AWAITING_INFO" and not sim_refunds, case["state"]))
+        # waiting on the customer, or one of the other outcomes the label also accepts, and no money either way
+        states = {"AWAITING_INFO", *(a.get("case_state") for a in label.get("also_accept", []))}
+        v.checks.append(Check("6_approval_info", case["state"] in states and not sim_refunds, case["state"]))
     else:
         v.checks.append(Check("6_approval_info", True))
     return v

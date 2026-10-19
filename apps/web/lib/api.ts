@@ -8,6 +8,39 @@ export type CaseRow = {
   needs_approval: boolean;
 };
 
+export type BenchmarkRow = {
+  id: string;
+  split: string;
+  split_sha256: string;
+  arm: string;
+  model: string | null;
+  n: number;
+  passed: number;
+  wrong_closes: number;
+  started_at: string;
+};
+
+export type BenchmarkReport = {
+  arm: string;
+  model: string | null;
+  split: string;
+  n: number;
+  passed: number;
+  task_success: number;
+  task_success_ci95: [number, number];
+  autonomous_resolution: number;
+  wrong_closes: number;
+  escalated: number;
+  money_safe: number;
+  supervisor_approvals: number;
+  per_family: Record<string, { n: number; passed: number }>;
+  failures: { seed: string; family: string; variant: string; observed: string; disposition: string | null; why: unknown }[];
+  seconds_p50: number;
+  seconds_p95: number;
+  model_calls_p50: number;
+  model_cost_micros: number;
+};
+
 export type DeadLetter = {
   id: number;
   case_id: string;

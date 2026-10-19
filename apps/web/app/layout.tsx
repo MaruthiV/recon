@@ -11,6 +11,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <a href="/" className="brand">
             Recon
           </a>
+          <nav className="nav">
+            <a href="/">Cases</a>
+            <a href="/benchmarks">Benchmarks</a>
+          </nav>
           <span className="muted">synthetic sandbox, no real money</span>
         </header>
         <main>{children}</main>
