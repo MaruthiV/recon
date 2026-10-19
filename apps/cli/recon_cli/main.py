@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -59,6 +60,7 @@ async def seed(args: argparse.Namespace) -> None:
                 eval_engine,
                 datetime.now(UTC),
                 tenant=args.tenant,
+                amount_minor=args.amount,
                 ids=seeded_ids(args.seed) if args.seed else new_id,
             )
         indexed = await index_from_env(sessions(app_engine))
@@ -192,6 +194,10 @@ async def resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _interrupt(*_: object) -> None:
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="recon")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -199,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--profile", choices=["demo"], default="demo")
     s.add_argument("--tenant", default="acme")
     s.add_argument("--seed", help="deterministic ids, needed to replay a recorded tape")
+    s.add_argument("--amount", type=int, default=4900, help="charge in minor units, over 10000 needs an approval")
     i = sub.add_parser("investigate", help="run INVESTIGATE then the deterministic money path for one case")
     i.add_argument("--case", required=True)
     i.add_argument("--tenant", default="t_acme")
@@ -211,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("dev", help="local stack: sim, mcp-read, mcp-exec, worker (auto-restart), api, web")
     v.add_argument("--agent", help="live:<model> (needs RECON_LIVE=1) or replay:<tape>")
     v.add_argument("--no-web", action="store_true")
+    v.add_argument("--families", action="store_true", help="also seed one case per workflow variant (t_demo_* tenants)")
     sub.add_parser("index", help="embed policy chunks for hybrid search (needs RECON_EMBED_MODEL)")
     d = sub.add_parser("demo", help="spec §25 demo, no model calls")
     d.add_argument("scenario", choices=["dup-charge"])
@@ -226,8 +234,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "dev":
         from .dev import dev
 
+        # a plain kill (playwright, ci, a terminal closing) cleans up the children like ctrl-c does
+        signal.signal(signal.SIGTERM, _interrupt)
         try:
-            return asyncio.run(dev(NAMES, args.agent, not args.no_web))
+            return asyncio.run(dev(NAMES, args.agent, not args.no_web, args.families))
         except KeyboardInterrupt:
             return 0
     if args.cmd == "demo":

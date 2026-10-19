@@ -131,10 +131,10 @@ class Executor:
             facts = replace(await load_case_facts(s, tenant_id, case_id, now), provider_refunds=provider_refunds)
             verdict = validate(plan, facts)
         except NotFound:
-            # no order yet: asking for one is fine, moving money isn't
+            # no order yet: asking or escalating is fine, refunding, denying or "already refunded" can't be backed
             verdict = (
                 Verdict(Decision.REJECT, ("case has no order",))
-                if plan.recommended_disposition in MONEY_DISPOSITIONS
+                if plan.recommended_disposition in (*MONEY_DISPOSITIONS, Disposition.DENY, Disposition.ALREADY_REFUNDED)
                 else Verdict(Decision.NO_MONEY, (f"{plan.recommended_disposition} moves no money",))
             )
         plan_id = new_id("plan")

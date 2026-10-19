@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -12,7 +12,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from recon_domain.connector import Clock, SystemClock
+from recon_domain.connector import Clock, FakeClock, SystemClock
 from recon_domain.plan import canonical_hash
 from recon_domain.states import CaseState
 from recon_domain.tokens import BadToken, mint, verify
@@ -160,7 +160,10 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
 
     app.state.session_key = session_key
     app.state.clock = clock
-    pipeline = Pipeline(db, clock, Executor(db, clock, no_provider_key), worker_id="api")
+    # keyless, and no provider reads either: rules only claims "already refunded" off recon's own ledger
+    executor = Executor(db, clock, no_provider_key)
+    executor.reader_for = None
+    pipeline = Pipeline(db, clock, executor, worker_id="api")
 
     async def own_case(tenant: str, case_id: str) -> Case:
         async with db() as s:
@@ -542,9 +545,11 @@ def create_app(db: async_sessionmaker, clock: Clock, session_key: bytes, dev: bo
 def create_from_env() -> FastAPI:
     env = os.environ.get("RECON_ENV", "dev")
     db = sessions(make_engine(os.environ.get("RECON_DATABASE_URL") or url("recon_app", "recon")))
+    # a frozen clock for tests and demos, shared with the worker so timestamps agree
+    fixed = os.environ.get("RECON_NOW")
     return create_app(
         db,
-        SystemClock(),
+        FakeClock(datetime.fromisoformat(fixed)) if fixed else SystemClock(),
         os.environ.get("RECON_SESSION_KEY", "dev-session-key").encode(),
         dev=env != "public",
         faults_enabled=os.environ.get("RECON_FAULTS") == "1" and env != "public",

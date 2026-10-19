@@ -140,8 +140,15 @@ def test_other_customers_payment_rejected():
     assert v.decision is Decision.REJECT
 
 
+DISTINCT = facts(payments=(pay("pay_a", 0), pay("pay_b", 3, amount=1200)))
+
+
+def deny(**kw):
+    return plan(recommended_disposition="DENY", reason_code="INELIGIBLE", amount_minor=None, currency=None, **kw)
+
+
 def test_non_money_dispositions_move_nothing():
-    v = validate(plan(recommended_disposition="DENY", reason_code="INELIGIBLE"), facts())
+    v = validate(deny(), DISTINCT)
     assert v.decision is Decision.NO_MONEY and not v.can_execute
 
 
@@ -413,7 +420,7 @@ def test_a_plan_that_contradicts_itself_is_rejected(disposition, reason, ok):
         reason_code=reason,
         **({} if disposition == "REFUND" else {"amount_minor": None, "currency": None}),
     )
-    v = validate(p, facts())
+    v = validate(p, DISTINCT)
     assert (v.decision is not Decision.REJECT) is ok, v.reasons
 
 
@@ -450,3 +457,22 @@ def test_an_already_refunded_claim_is_checked_like_money(f, decision, why):
 def test_an_already_refunded_claim_has_to_name_a_payment_here():
     v = validate(refunded_claim(payment_id="pay_elsewhere"), facts(provider_refunds={"pay_elsewhere": ("succeeded",)}))
     assert v.decision is Decision.REJECT
+
+
+@pytest.mark.parametrize(
+    ("f", "decision", "why"),
+    [
+        # two different charges, the claimed duplicate is refused on the facts
+        (DISTINCT, Decision.NO_MONEY, "every refund basis"),
+        (return_facts(ret(received=False)), Decision.NO_MONEY, "every refund basis"),
+        (facts(now=T0 + timedelta(days=90)), Decision.NO_MONEY, "every refund basis"),
+        # the duplicate is owed, a denial would be a wrong answer to the customer
+        (facts(), Decision.REJECT, "is owed"),
+        (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))), Decision.REJECT, "already refunded"),
+        # nothing here was asked for in a way the facts can refuse
+        (facts(payments=(pay("pay_a", 0),)), Decision.REJECT, "nothing on this order"),
+    ],
+)
+def test_a_denial_has_to_refuse_something_real(f, decision, why):
+    v = validate(deny(), f)
+    assert v.decision is decision and any(why in r for r in v.reasons), v.reasons

@@ -350,6 +350,29 @@ def _already_refunded(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
     return _reject(f"no refund exists on {payment.id}")
 
 
+def _deny(facts: CaseFacts) -> Verdict:
+    # a denial has to refuse something that's on the order, and none of it may be owed or already paid back
+    paid = [p for p in facts.payments if p.status == "succeeded"]
+    asks: list[tuple[str, ReasonCode, str | None]] = []
+    if len(paid) > 1:
+        asks += [(p.id, ReasonCode.DUPLICATE_CAPTURE, None) for p in paid]
+    asks += [
+        (p.id, ReasonCode.RETURNED_ITEMS, r.id) for r in facts.returns if r.order_id == facts.order_id for p in paid
+    ]
+    sub = facts.subscription
+    if sub is not None and sub.order_id == facts.order_id and sub.cancelled_at is not None:
+        asks += [(p.id, ReasonCode.PRORATED_CANCELLATION, sub.id) for p in paid]
+    if not asks:
+        return _reject("nothing on this order to deny, ask for what's missing or escalate")
+    for pid, reason, subject in asks:
+        q = quote(facts, pid, reason, subject)
+        if q.eligible:
+            return _reject(f"{reason} on {pid} is owed, it can't be denied")
+        if q.reasons and q.reasons[0].startswith("nothing left"):
+            return _reject(f"{reason} on {pid} was already refunded, that's ALREADY_REFUNDED")
+    return Verdict(Decision.NO_MONEY, ("DENY moves no money", "every refund basis on the order was refused"))
+
+
 def validate(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
     if plan.case_id != facts.case_id:
         return _reject("plan is for a different case")
@@ -361,6 +384,8 @@ def validate(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
         return _reject(f"{plan.recommended_disposition} doesn't go with reason {plan.reason_code}")
     if plan.recommended_disposition is Disposition.ALREADY_REFUNDED:
         return _already_refunded(plan, facts)
+    if plan.recommended_disposition is Disposition.DENY:
+        return _deny(facts)
     if plan.recommended_disposition not in MONEY_DISPOSITIONS:
         return Verdict(Decision.NO_MONEY, (f"{plan.recommended_disposition} moves no money",))
 

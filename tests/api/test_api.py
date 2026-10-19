@@ -256,3 +256,18 @@ async def test_a_supervisor_sees_and_requeues_dead_letters(api, app_sessions):
 
     await login(api.c, tenant="t_globex", role="supervisor")
     assert (await api.c.post(url, json={})).status_code == 404  # someone else's event reads as missing
+
+
+async def test_a_rules_already_refunded_close_starts_from_the_keyless_api(api, app_sessions):
+    # recon's ledger already shows the duplicate refunded, rules closes it without any provider read
+    async with app_sessions() as s, s.begin():
+        await s.execute(
+            text("UPDATE payments SET refunded_minor = 4900 WHERE id = :p"), {"p": api.acme.duplicate_payment_id}
+        )
+    await login(api.c)
+    cid = api.acme.case_id
+    r = await api.c.post(f"/v1/cases/{cid}/investigations", json={"mode": "rules", "case_version": 1})
+    assert r.status_code == 202, r.text
+    await api.drain()
+    detail = (await api.c.get(f"/v1/cases/{cid}")).json()
+    assert (detail["case"]["state"], detail["case"]["resolution"]) == ("CLOSED", "ALREADY_REFUNDED")

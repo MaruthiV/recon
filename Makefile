@@ -1,4 +1,4 @@
-.PHONY: up down db db-fresh sim demo dev web-install web-check test test-fast lint fmt types check
+.PHONY: up down db db-fresh sim demo dev web-install web-check e2e test test-fast lint fmt types check
 
 up:
 	docker compose up -d --wait db
@@ -29,6 +29,10 @@ web-install:
 web-check:
 	pnpm --dir apps/web typecheck
 	pnpm --dir apps/web build
+
+# playwright against the real local stack (starts `recon dev` unless it's already up)
+e2e:
+	pnpm --dir apps/web e2e
 
 # spec §25: kill the worker after the provider commits, recover to one refund (no model calls)
 demo: db

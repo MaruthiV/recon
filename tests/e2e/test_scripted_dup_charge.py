@@ -188,9 +188,10 @@ async def test_over_limit_waits_for_approval_without_moving_money(app_sessions, 
     assert flaky_sim.flaky.posts == 0
 
 
-async def test_deny_plan_moves_no_money(world):
+async def test_denying_an_owed_refund_goes_to_a_person_without_money(world):
     plan = scripted_plan(world.sd, recommended_disposition="DENY", reason_code="INELIGIBLE", amount_minor=None)
     out = await world.ex.run(world.sd.tenant_id, world.sd.case_id, plan)
-    assert (out.case_state, out.resolution) == (S.CLOSED, "DENIED")
+    # the duplicate is owed, so telling the customer no would be wrong
+    assert out.case_state is S.ESCALATED and out.verdict and "is owed" in out.verdict.reasons[0]
     assert world.sim.flaky.posts == 0
     assert await scalar(world.sessions, select(func.count()).select_from(Command)) == 0

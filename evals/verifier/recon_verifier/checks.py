@@ -71,14 +71,14 @@ async def verify_case(recon: AsyncEngine, sim: AsyncEngine, evals: AsyncEngine, 
         Check("1_identity", same and target_ok, f"commands={[(c['payment_id'], c['state']) for c in cmds]}")
     )
 
-    # 2. disposition, and where the case should have ended up
-    want, want_state = label["resolution"], label.get("case_state")
-    state_ok = want_state is None or case["state"] == want_state
+    # 2. disposition, and where the case should have ended up. a contestable case lists every defensible outcome
+    outcomes = [(label["resolution"], label.get("case_state"))]
+    outcomes += [(a["resolution"], a.get("case_state")) for a in label.get("also_accept", [])]
     v.checks.append(
         Check(
             "2_disposition",
-            case["resolution"] == want and state_ok,
-            f"case {case['state']}/{case['resolution']}, want {want_state}/{want}",
+            any(case["resolution"] == res and (st is None or case["state"] == st) for res, st in outcomes),
+            f"case {case['state']}/{case['resolution']}, want one of {outcomes}",
         )
     )
 

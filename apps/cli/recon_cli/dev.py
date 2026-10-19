@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -10,8 +11,9 @@ from pathlib import Path
 import httpx
 
 from recon_fixtures.dup_charge import seed_duplicate_charge
+from recon_fixtures.families import TENANTS, make_specs, materialize
 from recon_retrieval.index import index_from_env
-from recon_storage.db import DbNames, make_engine, sessions, url
+from recon_storage.db import DbNames, make_engine, new_id, sessions, url
 from recon_worker.app import TOKEN_HEADER
 from recon_worker.dispatch import Dispatcher, Sweeper
 
@@ -20,6 +22,7 @@ PORTS = {"sim": 8100, "worker": 8101, "exec": 8102, "read": 8103, "api": 8000, "
 OPERATOR = os.environ.get("SIM_OPERATOR_TOKEN", "sim-operator-dev")
 WORKER_TOKEN = "dev-worker-token"
 TENANT = "acme"
+DEMO_PREFIX = "demo_"
 
 
 def log(who: str, msg: str) -> None:
@@ -34,10 +37,36 @@ def py(factory: str, port: int, env: dict[str, str]) -> subprocess.Popen:
 
 
 def start_web() -> subprocess.Popen:
+    # its own process group, so stopping it takes next's children down too
     return subprocess.Popen(
         ["pnpm", "--dir", str(ROOT / "apps" / "web"), "dev", "--port", str(PORTS["web"])],
         env={**os.environ, "RECON_API_URL": f"http://127.0.0.1:{PORTS['api']}"},
+        start_new_session=True,
     )
+
+
+def stop(p: subprocess.Popen, sig: int = signal.SIGTERM) -> None:
+    if p.poll() is not None:
+        return
+    try:
+        if os.getpgid(p.pid) == p.pid:
+            os.killpg(p.pid, sig)
+        else:
+            p.send_signal(sig)
+    except ProcessLookupError:
+        pass
+
+
+async def seed_families(db, sim: httpx.AsyncClient, op: dict[str, str], evals) -> list[dict[str, str]]:
+    # one case per workflow variant, so all six families can be clicked through
+    seen, out = set(), []
+    for spec in make_specs("demo", per_family=5, seed=1):
+        if (spec.family, spec.variant) in seen:
+            continue
+        seen.add((spec.family, spec.variant))
+        sd = await materialize(spec, db, sim, op, evals, datetime.now(UTC), "demo", new_id, DEMO_PREFIX)
+        out.append({"tenant_id": sd.tenant_id, "family": sd.family, "variant": sd.variant, "case_id": sd.case_id})
+    return out
 
 
 def wait_up(base: str, proc: subprocess.Popen, seconds: int = 60) -> None:
@@ -53,14 +82,13 @@ def wait_up(base: str, proc: subprocess.Popen, seconds: int = 60) -> None:
     raise RuntimeError(f"{base} didn't come up")
 
 
-async def dev(names: DbNames, agent: str | None, web: bool) -> int:
+async def dev(names: DbNames, agent: str | None, web: bool, families: bool = False) -> int:
     """local stack for the v0.1 demo: every piece in its own process, the worker restarts when it dies"""
+    # the dup demo tenant, plus a demo copy of each families merchant (their own policies, no clash)
+    tenants = [TENANT, *(f"{DEMO_PREFIX}{k}" for k in TENANTS)]
     keys = {
-        f"t_{TENANT}": {
-            "secret": f"sk_test_{TENANT}",
-            "read": f"rk_test_{TENANT}",
-            "webhook_secret": "whsec_dev",
-        }
+        f"t_{name}": {"secret": f"sk_test_{name}", "read": f"rk_test_{name}", "webhook_secret": "whsec_dev"}
+        for name in tenants
     }
     common = {"RECON_PROVIDER_KEYS": json.dumps(keys), "RECON_SIM_URL": f"http://127.0.0.1:{PORTS['sim']}"}
     specs = {
@@ -117,6 +145,10 @@ async def dev(names: DbNames, agent: str | None, web: bool) -> int:
                 db, sim, {"x-sim-operator": OPERATOR}, evals, datetime.now(UTC), tenant=TENANT
             )
         log("seed", f"new demo case {sd.case_id} for tenant {sd.tenant_id}")
+        if families:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{PORTS['sim']}") as sim:
+                for row in await seed_families(db, sim, {"x-sim-operator": OPERATOR}, evals):
+                    log("seed", f"{row['tenant_id']:>16} {row['family']}/{row['variant']}  {row['case_id']}")
         if (indexed := await index_from_env(db)) is not None:
             log("seed", f"embedded {indexed} policy chunks, mcp-read searches hybrid")
         log(
@@ -155,10 +187,9 @@ async def dev(names: DbNames, agent: str | None, web: bool) -> int:
         return 0
     finally:
         for p in procs.values():
-            if p.poll() is None:
-                p.terminate()
+            stop(p)
         for p in procs.values():
             try:
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                p.kill()
+                stop(p, signal.SIGKILL)

@@ -233,11 +233,13 @@ MESSAGES = {
 
 
 async def ensure_tenant(
-    s, sim: httpx.AsyncClient, op: dict[str, str], key: str, ids: Callable[[str], str]
+    s, sim: httpx.AsyncClient, op: dict[str, str], key: str, ids: Callable[[str], str], prefix: str = ""
 ) -> dict[str, Any]:
+    # prefix keeps a demo copy of a merchant apart from a tenant some other fixture already made
     spec = TENANTS[key]
-    tid = f"t_{key}"
-    acct, sk, rk = f"acct_{key}", f"sk_test_{key}", f"rk_test_{key}"
+    name = f"{prefix}{key}"
+    tid = f"t_{name}"
+    acct, sk, rk = f"acct_{name}", f"sk_test_{name}", f"rk_test_{name}"
     r = await sim.post("/sim/accounts", json={"id": acct, "api_key": sk, "read_key": rk}, headers=op)
     r.raise_for_status()
     if (await s.execute(select(Tenant.id).where(Tenant.id == tid))).scalar() is None:
@@ -328,6 +330,7 @@ async def materialize(
     now: datetime,
     split: str,
     ids: Callable[[str], str],
+    prefix: str = "",
 ) -> Seeded:
     v, amount = spec.variant, spec.amount
     placed = now - timedelta(days=spec.placed_days_ago)
@@ -335,7 +338,7 @@ async def materialize(
     limit = TENANTS[spec.tenant].approve_limit
 
     async with sessions() as s, s.begin():
-        t = await ensure_tenant(s, sim, op, spec.tenant, ids)
+        t = await ensure_tenant(s, sim, op, spec.tenant, ids, prefix)
     tid = t["tenant_id"]
     await sim.post("/sim/clock", json={"freeze_at": now.isoformat()}, headers=op)
 
@@ -408,6 +411,11 @@ async def materialize(
             expect = _refund(pays[0], owed, f"return:{order}:{returns[0][0]}")
             if owed > limit:
                 expect["requires_approval"] = True  # ends refunded, but only through an approval
+        if v == "not_received":
+            # nothing is owed yet: denying it or waiting for the parcel are both fair (decided 2026-10-19)
+            expect["also_accept"] = [
+                {"disposition": "REQUEST_INFORMATION", "resolution": None, "case_state": "AWAITING_INFO"}
+            ]
         # not_received, window and returns_off all stay DENY: nothing is owed yet or at all
     elif fam == "proration":
         price = amount

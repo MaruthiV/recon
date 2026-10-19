@@ -148,9 +148,16 @@ class Ledger:
                 .all()
             )
             live = next((c for c in existing if c.state != C.CONFIRMED_FAILURE), None)
-            if live is not None:
+            if live is not None and live.amount_minor == first.amount.amount_minor:
+                # another ticket asking for the same refund rides on the command that's already there
                 audit(s, tenant_id, "prepare_converged", now, case_id=case_id, command_id=live.id, plan_id=plan_id)
                 return Prepared(live.id, first, converged=True)
+            if live is not None:
+                # one live command per entitlement: a different amount would close this ticket on someone else's
+                # refund, so a person decides what's still owed
+                why = f"{ref} already has a {live.amount_minor} refund ({live.state}), {first.amount.amount_minor} needs a person"
+                audit(s, tenant_id, "prepare_refused", now, case_id=case_id, decision="ESCALATE", reasons=[why])
+                return Prepared(None, Verdict(Decision.ESCALATE, (why,)))
 
             # decide for real on facts read under the locks
             verdict = validate(plan, await load_case_facts(s, tenant_id, case_id, now))
