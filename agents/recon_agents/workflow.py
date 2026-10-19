@@ -18,13 +18,19 @@ from google.adk.workflow import FunctionNode, JoinNode, Workflow
 
 from recon_domain.plan import ResolutionPlan
 
-from .roles import COORDINATOR, INVESTIGATOR, POLICY, ROLE_TOOLS, ROLES
+from .roles import COORDINATOR, INVESTIGATOR, POLICY, ROLE_TOOLS, SINGLE, roles_of
 from .schemas import PaymentFacts, PolicyEvidence
 
 APP_NAME = "recon_investigate"
 PROMPTS = Path(__file__).parent / "prompts"
-OUTPUTS: dict[str, type] = {INVESTIGATOR: PaymentFacts, POLICY: PolicyEvidence, COORDINATOR: ResolutionPlan}
+OUTPUTS: dict[str, type] = {
+    INVESTIGATOR: PaymentFacts,
+    POLICY: PolicyEvidence,
+    COORDINATOR: ResolutionPlan,
+    SINGLE: ResolutionPlan,
+}
 GRAPH = "START -> (payment_investigator, policy_specialist) -> join -> brief -> coordinator"
+SINGLE_GRAPH = "START -> single_agent"
 
 
 def prompt(role: str) -> str:
@@ -38,13 +44,14 @@ def model_id(m: BaseLlm | str) -> str:
 
 def workflow_version(models: Mapping[str, BaseLlm | str]) -> str:
     # resume is only safe when prompts, schemas, graph and models all match
+    roles = roles_of(models)
     blob = {
         "adk": version("google-adk"),
-        "graph": GRAPH,
-        "prompts": {r: prompt(r) for r in ROLES},
-        "schemas": {r: OUTPUTS[r].model_json_schema() for r in ROLES},
-        "tools": {r: list(ROLE_TOOLS[r]) for r in ROLES},
-        "models": {r: model_id(models[r]) for r in ROLES},
+        "graph": SINGLE_GRAPH if roles == (SINGLE,) else GRAPH,
+        "prompts": {r: prompt(r) for r in roles},
+        "schemas": {r: OUTPUTS[r].model_json_schema() for r in roles},
+        "tools": {r: list(ROLE_TOOLS[r]) for r in roles},
+        "models": {r: model_id(models[r]) for r in roles},
     }
     digest = hashlib.sha256(json.dumps(blob, sort_keys=True).encode()).hexdigest()
     return f"wf_{digest[:16]}"
@@ -71,8 +78,15 @@ def build_app(
             tools=[toolset_for(role)],
             output_schema=OUTPUTS[role],
         )
-        for role in ROLES
+        for role in roles_of(models)
     }
+    if SINGLE in agents:
+        return App(
+            name=APP_NAME,
+            root_agent=Workflow(name="investigate", edges=[("START", agents[SINGLE])]),
+            plugins=plugins or [],
+            resumability_config=ResumabilityConfig(is_resumable=True),
+        )
     graph = Workflow(
         name="investigate",
         edges=[

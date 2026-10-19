@@ -1,4 +1,4 @@
-.PHONY: up down db db-fresh sim demo dev web-install web-check e2e test test-fast lint fmt types check
+.PHONY: up down db db-fresh sim demo dev web-install web-check e2e faults test test-fast lint fmt types check
 
 up:
 	docker compose up -d --wait db
@@ -40,6 +40,10 @@ demo: db
 
 test: up
 	uv run pytest
+
+# e3: all 10 fault families x 10 instances + no-fault controls (ci runs one instance each)
+faults: up
+	RECON_FAULT_SUITE=full uv run pytest tests/faults/test_fault_suite.py -q
 
 test-fast:
 	uv run pytest tests/domain tests/test_no_floats.py tests/test_boundaries.py

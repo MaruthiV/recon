@@ -334,3 +334,20 @@ async def test_duplicate_charge_agent_path_local(aw):
     assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED"), (run.failure, out.problems)
     assert len(await aw.refunds()) == 1
     assert (await aw.verify(sd)).passed
+
+
+async def test_the_single_agent_baseline_runs_the_same_money_path(aw):
+    from recon_agents.roles import SINGLE
+    from tests.agents.fakes import FAKE_MODEL, ScriptedLlm, single
+
+    sd = await aw.seed()
+    models = {SINGLE: ScriptedLlm(model=FAKE_MODEL, script=single)}
+    out = await aw.resolve(sd, models)
+    assert (out.case_state, out.resolution) == (S.CLOSED, "REFUNDED")
+    assert len(await aw.refunds()) == 1 and (await aw.verify(sd)).passed
+    [run] = await aw.rows(Run)
+    # one agent, its own workflow version, the plan still goes through the validator and ledger
+    assert set(run.models) == {"mode", SINGLE} and run.workflow_version == workflow_version(models)
+    assert run.workflow_version != workflow_version(fake_models())
+    [plan] = await aw.rows(Plan)
+    assert plan.decision == "AUTHORIZE"

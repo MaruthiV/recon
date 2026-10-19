@@ -194,6 +194,39 @@ async def resume(args: argparse.Namespace) -> int:
     return 0
 
 
+async def evaluate(args: argparse.Namespace) -> int:
+    import logging
+
+    from recon_agents.meter import Budget
+    from recon_bench.report import report
+    from recon_bench.run import Arm, run
+    from recon_bench.world import world
+
+    if args.arm != "rules" and not (args.model or args.replay):
+        print("agent arms need --model (e.g. ollama:qwen3:4b-instruct) or --replay <run dir>")
+        return 2
+    live = args.model and not args.model.startswith("ollama:") and not args.replay
+    if live and not live_allowed():
+        print("refusing: gemini calls need RECON_LIVE=1 and GEMINI_API_KEY")
+        return 2
+    arm = Arm(
+        args.arm,
+        args.model,
+        Path(args.replay) if args.replay else None,
+        Budget(max_model_calls=args.calls, max_tool_calls=args.calls + 2, max_seconds=900),
+    )
+    # one line per case is the progress, not every http request
+    for name in ("httpx", "httpx2", "mcp", "google_adk", "google"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    split = lambda v: set(filter(None, (v or "").split(","))) or None  # noqa: E731
+    async with world() as w:
+        out = await run(w, args.split, arm, Path(args.out), split(args.families), split(args.only), args.limit)
+    if not args.replay:
+        print(report([out]))
+    print(out)
+    return 0
+
+
 def _interrupt(*_: object) -> None:
     raise KeyboardInterrupt
 
@@ -220,6 +253,19 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--no-web", action="store_true")
     v.add_argument("--families", action="store_true", help="also seed one case per workflow variant (t_demo_* tenants)")
     sub.add_parser("index", help="embed policy chunks for hybrid search (needs RECON_EMBED_MODEL)")
+    ev = sub.add_parser("eval", help="run one arm over a frozen split, writing spec §20 artifacts per case")
+    ev.add_argument("--split", choices=["dev", "val"], default="dev")  # held_out waits for m6
+    ev.add_argument("--arm", choices=["rules", "graph", "single"], default="rules")
+    ev.add_argument("--model", help="ollama:<tag> (free, local) or a gemini id (needs RECON_LIVE=1)")
+    ev.add_argument("--replay", help="a previous run dir: recorded traces, validation only, nothing sent")
+    ev.add_argument("--families", help="comma-separated families")
+    ev.add_argument("--only", help="comma-separated case seeds, to re-run single cases from a manifest")
+    ev.add_argument("--limit", type=int)
+    ev.add_argument("--calls", type=int, default=10, help="model call budget per case")
+    ev.add_argument("--out", default="results/eval")
+    rp = sub.add_parser("report", help="aggregate eval runs, side by side")
+    rp.add_argument("runs", nargs="+")
+    rp.add_argument("--out")
     d = sub.add_parser("demo", help="spec §25 demo, no model calls")
     d.add_argument("scenario", choices=["dup-charge"])
     d.add_argument("--fault", choices=["FP4"], default="FP4")
@@ -229,6 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "index":
         return asyncio.run(reindex())
+    if args.cmd == "eval":
+        return asyncio.run(evaluate(args))
+    if args.cmd == "report":
+        from recon_bench.report import report
+
+        print(report([Path(r) for r in args.runs], Path(args.out) if args.out else None))
+        return 0
     if args.cmd == "resume":
         return asyncio.run(resume(args))
     if args.cmd == "dev":

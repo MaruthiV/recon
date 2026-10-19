@@ -17,7 +17,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from recon_agents.meter import Budget, Pricing, RunMeter, UsageRecord
-from recon_agents.roles import COORDINATOR, INVESTIGATOR, POLICY, ROLE_TOOLS, ROLES
+from recon_agents.roles import INVESTIGATOR, POLICY, ROLE_TOOLS, planner, roles_of
 from recon_agents.workflow import APP_NAME, build_app, model_id, workflow_version
 from recon_domain.connector import Clock
 from recon_domain.plan import ResolutionPlan
@@ -130,7 +130,7 @@ class Investigator:
                 stage=stage,
                 investigation="RUNNING",
                 workflow_version=wf,
-                models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in ROLES}},
+                models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in roles_of(self.cfg.models)}},
                 budget=self.cfg.budget.as_dict(),
                 created_at=now,
                 updated_at=now,
@@ -160,7 +160,10 @@ class Investigator:
                     .values(
                         investigation="RUNNING",
                         workflow_version=workflow_version(self.cfg.models),
-                        models={"mode": self.cfg.mode, **{r: model_id(self.cfg.models[r]) for r in ROLES}},
+                        models={
+                            "mode": self.cfg.mode,
+                            **{r: model_id(self.cfg.models[r]) for r in roles_of(self.cfg.models)},
+                        },
                         budget=self.cfg.budget.as_dict(),
                         updated_at=now,
                     )
@@ -170,10 +173,11 @@ class Investigator:
         async def sink(rec: UsageRecord) -> None:
             await self._record_usage(tenant_id, run_id, rec)
 
+        roles = roles_of(self.cfg.models)
         meter = RunMeter(
-            self.cfg.budget, self.cfg.pricing, {r: model_id(self.cfg.models[r]) for r in ROLES}, now.date(), sink
+            self.cfg.budget, self.cfg.pricing, {r: model_id(self.cfg.models[r]) for r in roles}, now.date(), sink
         )
-        toolsets = {role: self._toolset(tenant_id, case_id, run_id, role, now) for role in ROLES}
+        toolsets = {role: self._toolset(tenant_id, case_id, run_id, role, now) for role in roles}
         runner = Runner(app=build_app(self.cfg.models, toolsets.__getitem__, [meter]), session_service=self.adk)
         session = await self.adk.create_session(app_name=APP_NAME, user_id=tenant_id, state={"case": brief})
         msg = types.Content(role="user", parts=[types.Part(text=json.dumps({"case": brief}))])
@@ -186,7 +190,7 @@ class Investigator:
             async with asyncio.timeout(self.cfg.budget.max_seconds):
                 async for ev in runner.run_async(user_id=tenant_id, session_id=session.id, new_message=msg):
                     invocation_id = invocation_id or ev.invocation_id
-                    if ev.author in ROLES and getattr(ev, "output", None) is not None:
+                    if ev.author in roles and getattr(ev, "output", None) is not None:
                         outputs[ev.author] = jsonable(ev.output)
         except TimeoutError:
             status, failure = "BUDGET_EXHAUSTED", f"wall time over {self.cfg.budget.max_seconds}s"
@@ -199,7 +203,7 @@ class Investigator:
 
         plan = None
         if status == "SUCCEEDED":
-            raw = outputs.get(COORDINATOR)
+            raw = outputs.get(planner(roles))
             if raw is None:
                 status, failure = "FAILED", "workflow ended without a plan"
             else:

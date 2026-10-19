@@ -46,6 +46,7 @@ packages = [
     "agents/recon_agents",
     "evals/verifier/recon_verifier",
     "evals/fixtures/recon_fixtures",
+    "evals/bench/recon_bench",
 ]
 
 [tool.uv]
@@ -92,6 +93,7 @@ known-first-party = [
     "recon_cli",
     "recon_verifier",
     "recon_fixtures",
+    "recon_bench",
 ]
 
 [tool.pyright]

@@ -16,10 +16,12 @@ PKGS = {
     "recon_agents": "agents/recon_agents",
     "recon_verifier": "evals/verifier/recon_verifier",
     "recon_fixtures": "evals/fixtures/recon_fixtures",
+    "recon_bench": "evals/bench/recon_bench",
 }
 # who may not import whom
 FORBIDDEN = {
     "provider_sim": {
+        "recon_bench",
         "recon_retrieval",
         "recon_domain",
         "recon_storage",
@@ -30,6 +32,7 @@ FORBIDDEN = {
         "recon_fixtures",
     },
     "recon_verifier": {
+        "recon_bench",
         "recon_retrieval",
         "recon_domain",
         "recon_storage",
@@ -40,6 +43,7 @@ FORBIDDEN = {
         "recon_fixtures",
     },
     "recon_domain": {
+        "recon_bench",
         "recon_retrieval",
         "recon_storage",
         "recon_worker",
@@ -54,6 +58,7 @@ FORBIDDEN = {
         "mcp",
     },
     "recon_storage": {
+        "recon_bench",
         "recon_worker",
         "recon_mcp",
         "recon_agents",
@@ -62,9 +67,10 @@ FORBIDDEN = {
         "httpx",
         "fastapi",
     },
-    "recon_worker": {"provider_sim", "recon_mcp", "recon_verifier", "recon_fixtures"},
+    "recon_worker": {"provider_sim", "recon_mcp", "recon_verifier", "recon_fixtures", "recon_bench"},
     # provider clients know http + domain types, nothing about recon's db or apps
     "recon_provider": {
+        "recon_bench",
         "recon_storage",
         "recon_worker",
         "recon_mcp",
@@ -76,6 +82,7 @@ FORBIDDEN = {
     },
     # retrieval knows the policy tables and an embedding server, nothing about money or agents
     "recon_retrieval": {
+        "recon_bench",
         "recon_domain",
         "recon_storage",
         "recon_provider",
@@ -91,6 +98,7 @@ FORBIDDEN = {
     },
     # the api starts work and reads state, it never talks to the provider, the agents or the graders
     "recon_api": {
+        "recon_bench",
         "provider_sim",
         "recon_verifier",
         "recon_fixtures",
@@ -100,9 +108,18 @@ FORBIDDEN = {
         "httpx",
     },
     # mcp-read can't reach the worker (ledger, write key) or the agents
-    "recon_mcp": {"recon_worker", "recon_agents", "provider_sim", "recon_verifier", "recon_fixtures", "google"},
+    "recon_mcp": {
+        "recon_worker",
+        "recon_agents",
+        "provider_sim",
+        "recon_verifier",
+        "recon_fixtures",
+        "google",
+        "recon_bench",
+    },
     # agents only see tools, never the db or the money path
     "recon_agents": {
+        "recon_bench",
         "recon_retrieval",
         "recon_storage",
         "recon_worker",

@@ -209,3 +209,35 @@ class ScriptedLlm(BaseLlm):
 def fake_models(**scripts: Callable[[LlmRequest], list[types.Part]]) -> dict[str, BaseLlm]:
     chosen = {INVESTIGATOR: investigator, POLICY: policy, COORDINATOR: coordinator()} | scripts
     return {role: ScriptedLlm(model=FAKE_MODEL, script=s) for role, s in chosen.items()}
+
+
+def single(req: LlmRequest) -> list[types.Part]:
+    # the b2 baseline: one agent reads, searches, quotes and answers
+    brief = json.loads(first_text(req))["case"]
+    seen = results(req)
+    by_tool = {name: env for name, env in seen}
+    if "get_case" not in by_tool:
+        return [
+            call("get_case"),
+            call("list_payments", order_id=brief["order_id"]),
+            call("search_policy", query="duplicate charge refund"),
+        ]
+    payments = by_tool["list_payments"]["data"]["payments"]
+    refund_envs = [env for name, env in seen if name == "list_refunds"]
+    if not refund_envs:
+        return [call("list_refunds", payment_id=p["payment_id"]) for p in payments]
+    observed = [
+        {"ref": p["ref"], "refunds_lookup": env["status"]} for p, env in zip(payments, refund_envs, strict=True)
+    ]
+    dup = payments[-1]["payment_id"]
+    if "compute_refund_quote" not in by_tool and not any(o["refunds_lookup"] == "query_failed" for o in observed):
+        return [call("compute_refund_quote", payment_id=dup, reason_code="DUPLICATE_CAPTURE")]
+    hits = (by_tool["search_policy"].get("data") or {}).get("hits", [])
+    case = by_tool["get_case"]["data"]
+    pseudo = {
+        "case": {"case_id": case["case_id"], "case_version": case["case_version"]},
+        "payment_facts": {"payments": observed},
+        "policy_evidence": {"citations": [{"ref": h["ref"], "policy_id": h["policy_id"]} for h in hits]},
+    }
+    quote = (by_tool.get("compute_refund_quote") or {}).get("data")
+    return [answer(req, plan_payload(pseudo, quote))]
