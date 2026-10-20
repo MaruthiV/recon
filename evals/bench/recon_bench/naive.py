@@ -163,8 +163,10 @@ def instances(n: int) -> list[Spec]:
     return ok[:n]
 
 
-async def run_b3(w: World, model: Callable[[], BaseLlm], out, n: int = 10) -> dict[str, Any]:
+async def run_b3(w: World, model: Callable[[], BaseLlm], out, n: int = 10, name: str | None = None) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
+    meta = {"model": name, "instances": [s.seed for s in instances(n)], "faults": list(FAULTS)}
+    (out / "manifest.json").write_text(json.dumps(meta, indent=2) + "\n")
     rows = []
     for spec in instances(n):
         for fault in FAULTS:

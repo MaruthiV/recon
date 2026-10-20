@@ -115,7 +115,7 @@ def family_grid(arms: list[tuple[str, list[dict[str, Any]]]], path: Path, title:
     path.write_text(_svg(left + len(arms) * cw + 24, top + len(fams) * ch + 16, body, title))
 
 
-def duplicate_bars(rows: list[dict[str, Any]], path: Path) -> None:
+def duplicate_bars(rows: list[dict[str, Any]], path: Path, model: str | None = None) -> None:
     # b3: how often the naive agent's retries turn into a second refund, per provider behaviour
     labels = {
         "none": "provider behaves",
@@ -142,10 +142,10 @@ def duplicate_bars(rows: list[dict[str, Any]], path: Path) -> None:
             if w:
                 body.append(f"<rect x='{x:.1f}' y='{y}' width='{w:.1f}' height='26' fill='{color}'/>")
             x += w
-        body.append(f"<text x='{left + bar_w + 12}' y='{y + 19}' font-size='13.5' fill='{INK}'>{dup}/{n} twice</text>")
-    path.write_text(
-        _svg(left + bar_w + 110, top + len(labels) * row_h + 10, body, "Naive agent with a direct refund tool")
-    )
+        note = f"{one + dup}/{n} refunded, {dup} twice"
+        body.append(f"<text x='{left + bar_w + 12}' y='{y + 19}' font-size='13.5' fill='{INK}'>{note}</text>")
+    title = f"Naive agent with a direct refund tool ({model})" if model else "Naive agent with a direct refund tool"
+    path.write_text(_svg(left + bar_w + 190, top + len(labels) * row_h + 10, body, title))
 
 
 def from_results(root: Path, out: Path, val_runs: dict[str, Path] | None = None, b3: Path | None = None) -> list[Path]:
@@ -163,6 +163,8 @@ def from_results(root: Path, out: Path, val_runs: dict[str, Path] | None = None,
         family_grid(arms, out / "families.svg", "Right outcome by case family")
         made += [out / "validation.svg", out / "families.svg"]
     if b3 is not None:
-        duplicate_bars(json.loads((b3 / "results.json").read_text()), out / "naive-agent.svg")
+        meta = json.loads((b3 / "manifest.json").read_text()) if (b3 / "manifest.json").exists() else {}
+        model = (meta.get("model") or "").removeprefix("ollama:") or None
+        duplicate_bars(json.loads((b3 / "results.json").read_text()), out / "naive-agent.svg", model)
         made.append(out / "naive-agent.svg")
     return made

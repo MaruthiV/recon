@@ -52,4 +52,6 @@ pre { background: #f5f5f4; padding: 8px; border-radius: 6px; font-size: 12px; ov
 .nav { display: flex; gap: 16px; }
 .nav a { color: var(--ink); font-weight: 500; }
 .scroll { overflow-x: auto; }
+/* every arm gets the same column width, so the two benchmark tables line up */
+table.compare { table-layout: fixed; min-width: 640px; }
 button.link { background: none; border: 0; padding: 0; font: inherit; color: var(--ink); cursor: pointer; }

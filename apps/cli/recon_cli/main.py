@@ -238,7 +238,7 @@ async def naive(args: argparse.Namespace) -> int:
     arm = Arm("single", args.model)
     out = Path(args.out) / datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     async with world("bench_b3") as w:
-        summary = await run_b3(w, lambda: arm.inner("naive_agent"), out, args.instances)
+        summary = await run_b3(w, lambda: arm.inner("naive_agent"), out, args.instances, args.model)
     print(json.dumps(summary, indent=2))
     print(out)
     return 0

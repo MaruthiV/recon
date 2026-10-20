@@ -1,0 +1,25 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='840' height='286' viewBox='0 0 840 286' font-family='-apple-system, Segoe UI, Helvetica, Arial, sans-serif'>
+<rect width='840' height='286' rx='12' fill='#fbfbf9' stroke='#e6e6e1'/>
+<text x='24' y='36' font-size='17' font-weight='600' fill='#1f2328'>Naive agent with a direct refund tool (qwen3:4b-instruct)</text>
+<rect x='24' y='54' width='12' height='12' rx='3' fill='#2f855a'/>
+<text x='42' y='64' font-size='13' fill='#6b6f76'>one refund</text>
+<rect x='124' y='54' width='12' height='12' rx='3' fill='#c53030'/>
+<text x='142' y='64' font-size='13' fill='#6b6f76'>refunded twice</text>
+<rect x='252' y='54' width='12' height='12' rx='3' fill='#d7d7d2'/>
+<text x='270' y='64' font-size='13' fill='#6b6f76'>no refund</text>
+<text x='24' y='111' font-size='14' fill='#1f2328'>provider behaves</text>
+<rect x='230.0' y='92' width='336.0' height='26' fill='#2f855a'/>
+<rect x='566.0' y='92' width='84.0' height='26' fill='#d7d7d2'/>
+<text x='662' y='111' font-size='13.5' fill='#1f2328'>8/10 refunded, 0 twice</text>
+<text x='24' y='157' font-size='14' fill='#1f2328'>500 before doing anything</text>
+<rect x='230.0' y='138' width='420.0' height='26' fill='#d7d7d2'/>
+<text x='662' y='157' font-size='13.5' fill='#1f2328'>0/10 refunded, 0 twice</text>
+<text x='24' y='203' font-size='14' fill='#1f2328'>rate limited (429)</text>
+<rect x='230.0' y='184' width='42.0' height='26' fill='#2f855a'/>
+<rect x='272.0' y='184' width='378.0' height='26' fill='#d7d7d2'/>
+<text x='662' y='203' font-size='13.5' fill='#1f2328'>1/10 refunded, 0 twice</text>
+<text x='24' y='249' font-size='14' fill='#1f2328'>refund done, then a 500</text>
+<rect x='230.0' y='230' width='294.0' height='26' fill='#2f855a'/>
+<rect x='524.0' y='230' width='126.0' height='26' fill='#d7d7d2'/>
+<text x='662' y='249' font-size='13.5' fill='#1f2328'>7/10 refunded, 0 twice</text>
+</svg>

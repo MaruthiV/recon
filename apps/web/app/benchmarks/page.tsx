@@ -5,6 +5,14 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type BenchmarkReport, type BenchmarkRow, micros, NotSignedIn } from "@/lib/api";
 
 const ARM_NAMES: Record<string, string> = { rules: "rules", graph: "multi-agent", single: "single agent" };
+const ARM_ORDER = ["rules", "graph", "single"];
+
+// failed verifier checks come back as ids like "3_amount"
+function why(w: unknown) {
+  if (typeof w === "string") return w.slice(0, 90);
+  if (Array.isArray(w)) return `failed: ${w.map((c) => String(c).replace(/^\d+_/, "").replaceAll("_", " ")).join(", ")}`;
+  return JSON.stringify(w);
+}
 
 function label(r: { arm: string; model: string | null }) {
   const name = ARM_NAMES[r.arm] ?? r.arm;
@@ -34,13 +42,17 @@ export default function Benchmarks() {
     const val = rows.filter((r) => r.split === "val");
     const pool = val.length ? val : rows;
     const split = pool[0].split_sha256;
+    // a run filtered to a few families isn't comparable to a full one
+    const full = Math.max(...pool.filter((r) => r.split_sha256 === split).map((r) => r.n));
     const seen = new Set<string>();
-    return pool.filter((r) => {
-      const key = `${r.arm}|${r.model}`;
-      if (r.split_sha256 !== split || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    return pool
+      .filter((r) => {
+        const key = `${r.arm}|${r.model}`;
+        if (r.split_sha256 !== split || r.n !== full || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => ARM_ORDER.indexOf(a.arm) - ARM_ORDER.indexOf(b.arm));
   }, [rows]);
 
   useEffect(() => {
@@ -78,7 +90,7 @@ export default function Benchmarks() {
             {shown[0].split} split · {shown[0].n} cases · <code>{shown[0].split_sha256.slice(0, 12)}</code>
           </h2>
           <div className="scroll">
-            <table>
+            <table className="compare">
               <thead>
                 <tr>
                   <th />
@@ -118,7 +130,7 @@ export default function Benchmarks() {
         <div className="panel">
           <h2>By case family</h2>
           <div className="scroll">
-            <table>
+            <table className="compare">
               <thead>
                 <tr>
                   <th />
@@ -172,7 +184,7 @@ export default function Benchmarks() {
                       <td>{f.observed}</td>
                       <td>{f.disposition ?? "none"}</td>
                       <td className="muted">
-                        <code>{typeof f.why === "string" ? f.why.slice(0, 90) : JSON.stringify(f.why)}</code>
+                        <code>{why(f.why)}</code>
                       </td>
                     </tr>
                   ))}
