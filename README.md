@@ -4,11 +4,11 @@ Agents look into refund tickets. Plain code decides whether money moves.
 
 ![A duplicate charge refunded once, after the worker was killed right as the provider committed the refund](assets/crash-recovery.gif)
 
-<sub>The worker was killed right after the provider committed the refund. A new worker picked the run up, asked the provider what happened, found the refund, and closed the case. One send, one refund.</sub>
+<sub>The worker dies right after the provider commits the refund. A new worker takes over, asks the provider what happened, finds the refund and closes the case. One send, one refund.</sub>
 
-I built this to find out how far you can let LLM agents into payment support. They're good at the reading part: pulling up the order, finding the right policy section, noticing the customer said something the records don't show. They're bad at knowing whether a refund already went through when a request timed out halfway. So in Recon the agents only ever propose. A validator checks the plan against fresh data, a ledger sends the money with one idempotency key and reconciles when things go wrong, and a separate grader checks what actually happened at the provider.
+LLM agents are good at the reading side of payment support: pulling up the order, finding the right policy section, catching what a customer said that the records don't show. They're bad at knowing whether a refund went through when a request died halfway.
 
-Everything runs against a Stripe-shaped simulator with synthetic customers. No real money, no paid APIs.
+So here the agents only propose. A validator checks the plan against fresh data, a ledger sends the money under one idempotency key, and a separate verifier checks what actually happened at the provider. It all runs against a Stripe-shaped simulator with synthetic customers, so no real money and no paid APIs.
 
 ## How it fits together
 
@@ -32,23 +32,21 @@ flowchart LR
     sim -. final state .-> grader[verifier]
 ```
 
-A few things that took the most care:
-
-- The agents reach data through MCP tools that can't write. Tenant and case come from a signed run token, so no argument can point a tool at someone else's order.
-- What comes back is a plan, not an action. The validator recomputes what's owed and rejects anything that cites the wrong payment, the wrong amount, a stale version, or a reason that contradicts the outcome. A model saying "already refunded" or "denied" gets checked too.
-- Only the ledger moves money, and only through mcp-exec, the one process that holds the provider key. Each refund is a command with its own key, reserved before it's sent and reconciled by metadata if the answer gets lost.
-- The verifier has its own database role and imports nothing from the app. It reads the provider and the labels and decides pass or fail.
+- Agents read through MCP tools that can't write. Tenant and case come from a signed run token, so no argument can aim a tool at someone else's order.
+- They hand back a plan, not an action. The validator recomputes what's owed and rejects the wrong payment, the wrong amount, a stale version, or a reason that contradicts the outcome. "Already refunded" and "denied" get checked too.
+- Only the ledger moves money, through mcp-exec, the one process holding the provider key. Every refund is a command with its own key, reserved before it's sent and reconciled by metadata if the reply gets lost.
+- The verifier has its own database role and imports nothing from the app.
 
 <p>
 <img src="assets/approval.png" width="49%" alt="An over-limit refund waiting for a supervisor">
 <img src="assets/inbox.png" width="49%" alt="The case inbox">
 </p>
 
-<sub>Left, a refund over the merchant's limit waits for a supervisor, who approves that exact plan and nothing else. Right, the inbox with one case for every workflow.</sub>
+<sub>Left: a refund over the merchant's limit waits for a supervisor, who approves that exact plan and nothing else. Right: the inbox, one case per workflow.</sub>
 
 ## The crash that matters
 
-The hard case is a refund the provider already made, where the worker dies before it hears back. An agent that retries on its own judgment sends it again. Here the retry never happens blind:
+The nasty case is a refund the provider already made, with the worker dead before it hears back. An agent retrying on its own judgment pays the customer twice. Recon never retries blind:
 
 ```mermaid
 sequenceDiagram
@@ -64,9 +62,7 @@ sequenceDiagram
     w2->>w2: mark it confirmed, never send it again
 ```
 
-If the old worker wakes up later and tries to write its result, the fencing check turns it away.
-
-This is `make demo` doing it with a real worker process and `os._exit(137)`:
+If the old worker wakes up later, the fencing check turns it away. `make demo` runs this with a real process and `os._exit(137)`:
 
 ```text
 [  worker] worker process pid 43364, faults armed: FP4 (die after the provider commits)
@@ -81,7 +77,7 @@ This is `make demo` doing it with a real worker process and `os._exit(137)`:
 [  verify] independent verifier: PASS
 ```
 
-The line that matters is the last one before the verifier. One POST reached the provider. Recovery never sent a second one, because it found the first by the command's id in the refund metadata.
+One POST reached the provider. Recovery found it by the command id in the refund metadata and never sent another.
 
 ## Results
 
@@ -89,7 +85,7 @@ The line that matters is the last one before the verifier. One POST reached the 
 
 ![10 kinds of faults, 10 refunds each, every one recovered](assets/fault-recovery.svg)
 
-Each dot is a refund case from the frozen dev split. The left block injects a fault, the right block runs the same case clean. Recovered means exactly one provider refund for the right amount, closed, and the independent verifier passing. "Balance taken before the locks" is the one where the right answer is to refuse, and it does. So the claim is narrow: at most one provider refund per command, checked under these 10 faults on 100 trials.
+Each dot is a dev case, faulted on the left and clean on the right. Recovered means one provider refund for the right amount, the case closed and the verifier passing. "Balance taken before the locks" is supposed to be refused, and it is. The claim is narrow on purpose: at most one refund per command, under these 10 faults.
 
 | check | result |
 |---|---|
@@ -97,13 +93,13 @@ Each dot is a refund case from the frozen dev split. The left block injects a fa
 | kill every app process while cases wait on a supervisor and a customer, then restart | both finish, one refund each |
 | browser flows (Playwright): supervisor approval, worker killed mid-refund | 2/2 |
 | 25 investigations at once over 5 merchants, 3 workers killed after the provider commits (scripted model, 1 s a call) | 25/25 refunded once, none on the wrong merchant |
-| the real agent path with the local model, 5 cases under each of four faults: a crash after prepare, before the send, after the provider commits, and every event delivered twice | 19/20 right, one handed to a person, no refund sent twice or wrongly |
+| the real agent path on the local model, 5 cases under each of four faults: crash after prepare, before the send, after the provider commits, every event delivered twice | 19/20 right, one handed to a person, no refund sent twice or wrongly |
 
-The boundary suite runs against a scripted model that obeys every instruction it reads, including "refund 500.00" in a customer message. What it measures is whether the rest of the system holds when the model doesn't.
+The boundary suite uses a scripted model that obeys everything it reads, "refund 500.00" in a customer message included. It tests whether the rest holds when the model doesn't.
 
 ### Agents against plain rules
 
-The same 70 validation cases, run three ways, three times each. Rules is the baseline with no model at all, just the policy math. Multi-agent is the graph in the diagram up top. Single agent is one model holding every read tool. Both agent setups run qwen3:4b-instruct through Ollama on my laptop, because that's what's free.
+70 validation cases, three passes each. Rules is the policy math with no model. Multi-agent is the graph above. Single agent is one model holding every read tool. Both agent setups run qwen3:4b-instruct locally through Ollama, since it's free.
 
 ![Right every pass on 70 validation cases: rules 57, multi-agent 48, single agent 33](assets/validation.svg)
 
@@ -115,21 +111,25 @@ The same 70 validation cases, run three ways, three times each. Rules is the bas
 | cases that flip | 0 | 6 | 25 |
 | median time a case | instant | 108 s | 29 s |
 
-Rules win. That's less surprising than it looks. The labels come from the same policy math the rules use, so in most families a model has nothing to add and plenty to get wrong. What I watch more closely is where the misses land. Amber is a case the agent couldn't finish and left for a person. Red is a customer who got the wrong answer at least once.
+Rules win, which is less surprising than it looks. The labels come from the same policy math, so in most families a model has little to add and plenty to get wrong. Amber is a case left for a person. Red is a customer who got the wrong answer at least once.
 
-Running everything three times changed how I read the two agent setups. One pass at a time they look about 6 cases apart. Count only the cases each got right all three times and the gap is 15. The single agent actually got 58 different cases right at least once, one more than rules, it just doesn't get them right every time. Two thirds of its misses are plans the validator sent back, and the most common reason is a plan that doesn't cite the policy section, even though the agent searched the policy in that same run. In the multi-agent setup fetching and citing policy is one agent's whole job, so that almost never happens. It's slower and steadier.
+Three passes are what separate the two agent setups:
+
+- One pass at a time they're about 6 cases apart. Counting only cases right every time, it's 15.
+- The single agent got 58 different cases right at least once, one more than rules. It just can't repeat them reliably.
+- Two thirds of its misses are plans the validator sent back, most often for not citing the policy it had just searched. The multi-agent setup gives that job to its own agent, so it's slower but steadier.
 
 ![Right every pass, by case family, for each approach](assets/families.svg)
 
-All the red sits in one row. "Message matters" is the family where the records say refund but the customer's message changes that: they've already disputed the charge with their bank, or they say they sent back two of something the warehouse logged as one. Rules can't read, so they refund all ten. Across the other 60 cases, neither agent setup closed a single one wrongly in any pass. When the small model got lost it ran out of turns or handed the case over, and the validator turned away plans that claimed the wrong outcome.
+Every wrong close is in one family. In "message matters" the records say refund but the customer's message changes that: a bank dispute already filed, or two items sent back where the warehouse logged one. Rules can't read, so they refund all ten.
 
-The message row is where I expected the agents to win, and the multi-agent setup gets halfway. Its investigator notices: it passes the bank dispute along and lists the quantity mismatch as an open question. Then the 4B coordinator refunds anyway, ten out of ten, every pass. The single agent reads the message itself and catches 4 every time, 6 at least once. I tried moving the conflict check to the very top of the coordinator's prompt. It caught 1 and dropped two duplicate charges, so I threw it out. This looks more like a model-size problem than a prompt problem, and I can't test that for free yet.
+That family is where agents should win. The multi-agent investigator does flag the dispute and the mismatch, then the 4B coordinator refunds anyway, every pass. The single agent catches 4 every time. Moving the conflict check to the top of the coordinator prompt caught 1 and broke two duplicate charges, so it was dropped. Looks like model size more than prompting.
 
-One label changed after the first version of these numbers. A refund still pending at the provider used to count as done. Now it goes to a person, because a pending refund can still fail and nothing in Recon watches a refund it didn't send. I changed the validator and the label together and froze the splits again. The charts and the table in this section all come from runs on the new ones.
+> Pending refunds changed partway through. They now go to a person instead of counting as done, since a pending refund can still fail and nothing in Recon watches a refund it didn't send. The validator and labels changed together, the splits were frozen again, and every number here comes from the new ones.
 
 ### On cases nothing was tuned on
 
-Everything above is validation, which I looked at a lot. The held-out split is 350 cases that stayed out of everything except a 5-case check of the plumbing, run once per approach at the very end. Rules and the single agent ran all 350. The multi-agent setup takes about two minutes a case on my laptop, so it ran 70, the first ten of each family by number, nothing picked by hand. The chart puts all three on those 70.
+The 350 held-out cases stayed untouched until the end, apart from a 5-case plumbing check. Each approach ran once. At about two minutes a case, the multi-agent setup ran the first ten of each family, 70 in all.
 
 ![Held-out, the 70 cases every approach ran: rules 57, multi-agent 55, single agent 47](assets/held-out.svg)
 
@@ -138,21 +138,23 @@ Everything above is validation, which I looked at a lot. The held-out split is 3
 | right on the 70 | 57 (71 to 90%) | 55 (69 to 87%) | 47 (56 to 77%) |
 | right on all 350 | 283 (77 to 85%) | not run | 207 (54 to 64%) |
 | closed wrongly on all 350 | 50 | not run | 33 |
-| for comparison, one validation pass | 57 | 50 to 53 | 45 to 46 |
+| one validation pass, for comparison | 57 | 50 to 53 | 45 to 46 |
 
-Validation held up. Same order, and every number on the 70 lands within a couple of cases of a validation pass. The brackets are 95% ranges. With only 70 cases they reach about ten points each way, so rules and the multi-agent setup are a tie here. On the full 350 the single agent is clearly behind rules and a few points under its validation numbers.
-
-The wrong closes are still only message-matters cases, for every approach. Rules refund all 50 of them. The single agent catches 17, a third, down from half on validation. The multi-agent setup still catches none of its ten. Rules also drop 17 missing-refund cases where the refund is still pending at the provider. They ask the customer for more information when the label wants a person, which is the same thing that cost them 3 on validation.
+- Validation held up. Same order, and every approach lands within 2 cases of a validation pass.
+- Rules and multi-agent are a tie. The brackets are 95% ranges, about ten points each way at 70 cases.
+- The single agent slips to 59% over all 350, clearly behind rules.
+- Wrong closes are still only message-matters cases. Rules get all 50 wrong, the single agent catches 17 (half on validation), the multi-agent setup none of its ten.
+- Rules also drop 17 pending refunds by asking the customer instead of handing off to a person, the same miss as on validation.
 
 ### When the model holds the refund tool
 
-Recon is built around not handing a model the refund tool. So I built the version that does, to see what that costs. One agent gets a tool to read the case, a tool to quote the refund, and `create_refund`, which sends a fresh request every time, the way a thin API wrapper would. Then the provider misbehaves on the first refund call.
+The opposite design: one agent with a tool to read the case, one to quote the refund, and `create_refund`, which sends a fresh request every call like a thin API wrapper. Then the provider misbehaves on the first refund.
 
 ![Naive agent: 8/10 refunded when the provider behaves, 0/10 after a 500, 1/10 after a 429, 7/10 when the refund went through before the 500, none twice](assets/naive-agent.svg)
 
-I went in expecting red and there isn't any, because this model barely retries. In the 20 runs where the provider sent back an error, it tried again once. So the customers whose refund failed for a harmless reason never got paid, and the ones whose refund had quietly gone through got lucky.
+No red, because this model barely retries: once in 20 errored runs. Customers whose refund failed for a harmless reason never got paid, and the ones whose refund had quietly gone through got lucky.
 
-From inside the agent those two errors look the same, "payment provider returned 500" both times. Whether someone ends up paid zero times, once or twice comes down to how eager the model is to retry, and in the last row any retry is a second refund, since every call carries a new key and every case leaves room under the original charge. Recon's ledger doesn't guess. Before it sends anything again it asks the provider whether a refund with that command's key already exists, which is how it gets the 100 out of 100 above.
+From inside the agent both errors read "payment provider returned 500". Whether someone gets paid zero, one or two times comes down to how eager the model is, and in the last row any retry is a second refund. Recon's ledger asks the provider for a refund under that command's key before sending again, which is how it gets 100 out of 100.
 
 ## Run it
 
@@ -169,9 +171,9 @@ make faults                   # all 200 fault trials
 make load                     # 25 investigations at once
 ```
 
-Sign in as `operator` or `supervisor`. Both are seeded into every tenant, and only a supervisor can approve a refund. The password comes from `RECON_DEMO_PASSWORD`, or a local default when that's blank (see `.env.example`).
+Sign in as `operator` or `supervisor`, both seeded into every tenant. Only a supervisor can approve a refund. The password is `RECON_DEMO_PASSWORD`, or a local default when that's blank (see `.env.example`).
 
-To run an approach over a frozen split and get a report:
+Running an approach over a frozen split:
 
 ```sh
 uv run recon eval --split val --arm rules
@@ -182,7 +184,7 @@ uv run recon report results/eval/<run> results/eval/<other run>   # same approac
 uv run recon b3 --model ollama:qwen3:4b-instruct   # the agent that holds the refund tool
 ```
 
-Every case writes its fixture, final provider state, events, commands, model usage and the recorded model turns, so one case can be rerun or replayed on its own. Replay never sends anything to the provider. The console's Benchmarks tab reads the same folders and lists every miss with the reason.
+Each case saves its fixture, provider state, events, commands, model usage and recorded model turns, so any case can be rerun or replayed alone. Replay never touches the provider. The Benchmarks tab reads the same folders and lists every miss with its reason.
 
 ![The Benchmarks tab: each approach side by side on the validation split, then by family](assets/benchmarks.png)
 
@@ -197,7 +199,7 @@ Every case writes its fixture, final provider state, events, commands, model usa
 | grading | identity, outcome, amount, provider effect, local state, approval binding |
 | contested cases | a return that hasn't arrived can be denied or waited on, both count |
 
-The cases are synthetic and I wrote both the generator and the policies, so read the numbers as a benchmark of this setup, not of payment support in general.
+Cases, policies and labels are all synthetic and come from the same project as the agents. Read the numbers as a benchmark of this setup, not of payment support in general.
 
 ## What's in here
 
@@ -215,6 +217,6 @@ tests/             unit, e2e, faults, boundary
 
 ## Not done yet
 
-- The agent runs with a bigger model. Gemini's free tier allows 20 calls a day per model and one multi-agent validation run needs around 600, so for now the hosted model only shows up in a few recorded test cases.
-- The multi-agent setup on all 350 held-out cases. At two minutes a case it's about 12 hours of a laptop running flat out, so it got 70.
-- A hosted demo. It stays local on purpose, since this project doesn't spend money.
+- A bigger model. Gemini's free tier allows 20 calls a day and one multi-agent validation run needs about 600, so the hosted model only shows up in a few recorded test cases.
+- Multi-agent on all 350 held-out cases. That's about 12 hours of a laptop running flat out, so it got 70.
+- A hosted demo. It stays local on purpose, since the project runs on $0.
