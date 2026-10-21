@@ -32,8 +32,10 @@ def pct(xs: list[float], q: float) -> float:
     return xs[min(len(xs) - 1, int(q * len(xs)))]
 
 
-def summarize(run_dir: Path) -> dict[str, Any]:
+def summarize(run_dir: Path, seeds: set[str] | None = None) -> dict[str, Any]:
     manifest, rows = load(run_dir)
+    if seeds is not None:
+        rows = [r for r in rows if r["seed"] in seeds]
     n = len(rows)
     passed = [r["passed"] for r in rows]
     fams: dict[str, list[bool]] = defaultdict(list)
@@ -174,6 +176,11 @@ def report(run_dirs: list[Path], out: Path | None = None) -> str:
     reps = repeats(run_dirs)
     if reps:
         md += "\n" + repeats_markdown(reps)
+    # runs over different cases also get compared on the ones they all share
+    cases = [{r["seed"] for r in load(d)[1]} for d in run_dirs]
+    shared = set.intersection(*cases)
+    if shared and any(c != shared for c in cases):
+        md += f"\nOn the {len(shared)} cases every run has:\n\n" + markdown([summarize(d, shared) for d in run_dirs])
     for d, s in zip(run_dirs, summaries, strict=True):
         (d / "report.json").write_text(json.dumps(s, indent=2) + "\n")
         (d / "summary.md").write_text(markdown([s]))

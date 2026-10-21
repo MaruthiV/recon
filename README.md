@@ -83,7 +83,7 @@ This is `make demo` doing it with a real worker process and `os._exit(137)`:
 
 The line that matters is the last one before the verifier. One POST reached the provider. Recovery never sent a second one, because it found the first by the command's id in the refund metadata.
 
-## Results so far
+## Results
 
 ### When things break
 
@@ -127,6 +127,23 @@ The message row is where I expected the agents to win, and the multi-agent setup
 
 One label changed after the first version of these numbers. A refund still pending at the provider used to count as done. Now it goes to a person, because a pending refund can still fail and nothing in Recon watches a refund it didn't send. I changed the validator and the label together and froze the splits again. The charts and the table in this section all come from runs on the new ones.
 
+### On cases nothing was tuned on
+
+Everything above is validation, which I looked at a lot. The held-out split is 350 cases that stayed out of everything except a 5-case check of the plumbing, run once per approach at the very end. Rules and the single agent ran all 350. The multi-agent setup takes about two minutes a case on my laptop, so it ran 70, the first ten of each family by number, nothing picked by hand. The chart puts all three on those 70.
+
+![Held-out, the 70 cases every approach ran: rules 57, multi-agent 55, single agent 47](assets/held-out.svg)
+
+| | rules | multi-agent | single agent |
+|---|---|---|---|
+| right on the 70 | 57 (71 to 90%) | 55 (69 to 87%) | 47 (56 to 77%) |
+| right on all 350 | 283 (77 to 85%) | not run | 207 (54 to 64%) |
+| closed wrongly on all 350 | 50 | not run | 33 |
+| for comparison, one validation pass | 57 | 50 to 53 | 45 to 46 |
+
+Validation held up. Same order, and every number on the 70 lands within a couple of cases of a validation pass. The brackets are 95% ranges. With only 70 cases they reach about ten points each way, so rules and the multi-agent setup are a tie here. On the full 350 the single agent is clearly behind rules and a few points under its validation numbers.
+
+The wrong closes are still only message-matters cases, for every approach. Rules refund all 50 of them. The single agent catches 17, a third, down from half on validation. The multi-agent setup still catches none of its ten. Rules also drop 17 missing-refund cases where the refund is still pending at the provider. They ask the customer for more information when the label wants a person, which is the same thing that cost them 3 on validation.
+
 ### When the model holds the refund tool
 
 Recon is built around not handing a model the refund tool. So I built the version that does, to see what that costs. One agent gets a tool to read the case, a tool to quote the refund, and `create_refund`, which sends a fresh request every time, the way a thin API wrapper would. Then the provider misbehaves on the first refund call.
@@ -160,6 +177,7 @@ To run an approach over a frozen split and get a report:
 uv run recon eval --split val --arm rules
 uv run recon eval --split val --arm graph --model ollama:qwen3:4b-instruct
 uv run recon eval --split val --arm single --model ollama:qwen3:4b-instruct
+RECON_HELD_OUT=1 uv run recon eval --split held_out --arm rules   # refused without the flag
 uv run recon report results/eval/<run> results/eval/<other run>   # same approach twice or more adds what flips
 uv run recon b3 --model ollama:qwen3:4b-instruct   # the agent that holds the refund tool
 ```
@@ -198,5 +216,5 @@ tests/             unit, e2e, faults, boundary
 ## Not done yet
 
 - The agent runs with a bigger model. Gemini's free tier allows 20 calls a day per model and one multi-agent validation run needs around 600, so for now the hosted model only shows up in a few recorded test cases.
-- Held-out runs. A 5-case smoke test checked the plumbing (rules 5/5, multi-agent 4/5). The full 350 run once per approach at the very end, so nothing gets tuned on them.
+- The multi-agent setup on all 350 held-out cases. At two minutes a case it's about 12 hours of a laptop running flat out, so it got 70.
 - A hosted demo. It stays local on purpose, since this project doesn't spend money.

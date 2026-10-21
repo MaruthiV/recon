@@ -164,7 +164,11 @@ def duplicate_bars(rows: list[dict[str, Any]], path: Path, model: str | None = N
 
 
 def from_results(
-    root: Path, out: Path, val_runs: dict[str, list[Path]] | None = None, b3: Path | None = None
+    root: Path,
+    out: Path,
+    val_runs: dict[str, list[Path]] | None = None,
+    b3: Path | None = None,
+    held_out: dict[str, Path] | None = None,
 ) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     made = []
@@ -184,6 +188,13 @@ def from_results(
             arms, out / "families.svg", "Right every pass, by case family" if k > 1 else "Right outcome by case family"
         )
         made += [out / "validation.svg", out / "families.svg"]
+    if held_out:
+        # one pass each, only the cases every run has, so a smaller agent run lines up with the full ones
+        loaded = {name: load(d)[1] for name, d in held_out.items()}
+        shared = set.intersection(*({r["seed"] for r in rows} for rows in loaded.values()))
+        arms = [(name, [[r for r in rows if r["seed"] in shared]]) for name, rows in loaded.items()]
+        outcome_bars(arms, out / "held-out.svg", f"Held-out, the {len(shared)} cases every approach ran")
+        made.append(out / "held-out.svg")
     if b3 is not None:
         meta = json.loads((b3 / "manifest.json").read_text()) if (b3 / "manifest.json").exists() else {}
         model = (meta.get("model") or "").removeprefix("ollama:") or None

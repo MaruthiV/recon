@@ -1,0 +1,25 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='930' height='240' viewBox='0 0 930 240' font-family='-apple-system, Segoe UI, Helvetica, Arial, sans-serif'>
+<rect width='930' height='240' rx='12' fill='#fbfbf9' stroke='#e6e6e1'/>
+<text x='24' y='36' font-size='17' font-weight='600' fill='#1f2328'>Held-out, the 70 cases every approach ran</text>
+<rect x='24' y='54' width='12' height='12' rx='3' fill='#2f855a'/>
+<text x='42' y='64' font-size='13' fill='#6b6f76'>right outcome</text>
+<rect x='145' y='54' width='12' height='12' rx='3' fill='#c27c0e'/>
+<text x='163' y='64' font-size='13' fill='#6b6f76'>missed, left open</text>
+<rect x='294' y='54' width='12' height='12' rx='3' fill='#c53030'/>
+<text x='312' y='64' font-size='13' fill='#6b6f76'>closed wrongly</text>
+<text x='24' y='111' font-size='14' fill='#1f2328'>rules</text>
+<rect x='190.0' y='92' width='456.0' height='26' fill='#2f855a'/>
+<rect x='646.0' y='92' width='24.0' height='26' fill='#c27c0e'/>
+<rect x='670.0' y='92' width='80.0' height='26' fill='#c53030'/>
+<text x='762' y='111' font-size='13.5' fill='#1f2328'><tspan font-weight='600'>57/70</tspan></text>
+<text x='24' y='157' font-size='14' fill='#1f2328'>multi-agent</text>
+<rect x='190.0' y='138' width='440.0' height='26' fill='#2f855a'/>
+<rect x='630.0' y='138' width='40.0' height='26' fill='#c27c0e'/>
+<rect x='670.0' y='138' width='80.0' height='26' fill='#c53030'/>
+<text x='762' y='157' font-size='13.5' fill='#1f2328'><tspan font-weight='600'>55/70</tspan></text>
+<text x='24' y='203' font-size='14' fill='#1f2328'>single agent</text>
+<rect x='190.0' y='184' width='376.0' height='26' fill='#2f855a'/>
+<rect x='566.0' y='184' width='144.0' height='26' fill='#c27c0e'/>
+<rect x='710.0' y='184' width='40.0' height='26' fill='#c53030'/>
+<text x='762' y='203' font-size='13.5' fill='#1f2328'><tspan font-weight='600'>47/70</tspan></text>
+</svg>

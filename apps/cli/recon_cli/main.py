@@ -302,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         help="name=run_dir pairs, comma separate repeats, e.g. rules=results/eval/a,results/eval/b",
     )
     ch.add_argument("--b3", help="a results/b3/<stamp> dir")
+    ch.add_argument("--held-out", nargs="*", default=[], help="name=run_dir pairs, compared on the cases they share")
     ch.add_argument("--out", default="assets")
     rp = sub.add_parser("report", help="aggregate eval runs, side by side")
     rp.add_argument("runs", nargs="+")
@@ -326,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out),
             {k: [Path(d) for d in v.split(",")] for k, v in runs.items()} or None,
             Path(args.b3) if args.b3 else None,
+            {k: Path(v) for k, v in (pair.split("=", 1) for pair in args.held_out)} or None,
         )
         print("\n".join(str(m) for m in made))
         return 0
