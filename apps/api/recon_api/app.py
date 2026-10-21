@@ -18,7 +18,20 @@ from recon_domain.plan import canonical_hash
 from recon_domain.states import CaseState
 from recon_domain.tokens import BadToken, mint, verify
 from recon_storage.db import make_engine, sessions, url
-from recon_storage.models import ApiRequest, Case, CaseMessage, Command, Order, OutboxEvent, Payment, Plan, Run, Tenant
+from recon_storage.models import (
+    ApiRequest,
+    Case,
+    CaseMessage,
+    Command,
+    Membership,
+    Order,
+    OutboxEvent,
+    Payment,
+    Plan,
+    Run,
+    User,
+)
+from recon_storage.users import DUMMY_HASH, check_password
 from recon_worker.executor import Executor
 from recon_worker.pipeline import NotStartable, Pipeline
 from recon_worker.rules_planner import plan_by_rules
@@ -50,9 +63,9 @@ LABELS = {
 
 
 class Login(BaseModel):
-    user: str
-    tenant_id: str
-    role: Literal["operator", "supervisor"] = "operator"
+    user: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=200)
+    tenant_id: str = Field(min_length=1, max_length=100)
 
 
 class Decide(BaseModel):
@@ -81,6 +94,7 @@ class Arm(BaseModel):
 
 
 IDEMPOTENCY_KEY = "Idempotency-Key"
+LOCK_AFTER, LOCK_FOR = 5, timedelta(minutes=5)  # failed sign-ins in a row, then a short lockout
 ABANDONED = timedelta(seconds=60)  # an unanswered key this old means the first try died
 
 
@@ -184,24 +198,55 @@ def create_app(
 
     @app.post("/v1/login")
     async def login(body: Login, response: Response):
-        if not dev:
-            raise HTTPException(404)
-        async with db() as s:
-            if (await s.execute(select(Tenant.id).where(Tenant.id == body.tenant_id))).scalar() is None:
-                raise HTTPException(400, "unknown tenant")
+        # one answer for a wrong name, a wrong password, a locked account and a tenant you're not in
+        nope = HTTPException(401, "wrong name or password")
         now = clock.now()
+        async with db() as s:
+            user = (await s.execute(select(User).where(User.username == body.user))).scalar_one_or_none()
+            member = (
+                (
+                    await s.execute(
+                        select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == body.tenant_id)
+                    )
+                ).scalar_one_or_none()
+                if user
+                else None
+            )
+        ok = check_password(body.password, user.password_hash if user else DUMMY_HASH)
+        if user is None:
+            raise nope
+        if user.locked_until is not None and user.locked_until > now:
+            raise nope
+        if not ok or member is None:
+            async with db() as s, s.begin():
+                fails = (
+                    await s.execute(
+                        update(User)
+                        .where(User.id == user.id)
+                        .values(failed_logins=User.failed_logins + 1)
+                        .returning(User.failed_logins)
+                    )
+                ).scalar_one()
+                if fails >= LOCK_AFTER:
+                    await s.execute(
+                        update(User).where(User.id == user.id).values(failed_logins=0, locked_until=now + LOCK_FOR)
+                    )
+            raise nope
+        async with db() as s, s.begin():
+            await s.execute(update(User).where(User.id == user.id).values(failed_logins=0, locked_until=None))
         token = mint(
             {
                 "aud": AUDIENCE,
-                "user": body.user,
-                "tenant": body.tenant_id,
-                "role": body.role,
+                "user": user.username,
+                "uid": user.id,
+                "tenant": member.tenant_id,
+                "role": member.role,
                 "exp": int((now + timedelta(hours=8)).timestamp()),
             },
             session_key,
         )
         response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=8 * 3600)
-        return {"user": body.user, "tenant_id": body.tenant_id, "role": body.role}
+        return {"user": user.username, "tenant_id": member.tenant_id, "role": member.role}
 
     @app.post("/v1/logout")
     async def logout(response: Response):

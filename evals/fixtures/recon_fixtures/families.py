@@ -392,12 +392,15 @@ async def materialize(
             preexisting.append(await _provider_refund(sim, op, t, pays[0][1], amount, pending=v == "pending"))
             if v == "succeeded":
                 settled[pays[0][1]] = amount
-            expect = {
-                "disposition": "ALREADY_REFUNDED",
-                "resolution": "ALREADY_REFUNDED",
-                "case_state": "CLOSED",
-                "financial": None,
-            }
+                expect = {
+                    "disposition": "ALREADY_REFUNDED",
+                    "resolution": "ALREADY_REFUNDED",
+                    "case_state": "CLOSED",
+                    "financial": None,
+                }
+            else:
+                # pending can still fail and nothing watches a refund recon didn't send, so not a close (spec §330)
+                expect = {"disposition": "ESCALATE", "resolution": None, "case_state": "ESCALATED", "financial": None}
         else:
             expect = {
                 "disposition": "REQUEST_INFORMATION",

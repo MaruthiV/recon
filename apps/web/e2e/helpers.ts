@@ -11,9 +11,17 @@ export function seed(amount = 4900): string {
   return JSON.parse(out.trim().split("\n").at(-1) ?? "{}").case_id;
 }
 
+// the demo password lives in one place, recon_storage/users.py (or RECON_DEMO_PASSWORD)
+export const PASSWORD = execFileSync(
+  "uv",
+  ["run", "python", "-c", "from recon_storage.users import demo_password; print(demo_password())"],
+  { cwd: "../..", encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+).trim();
+
 export async function login(page: Page, role: "operator" | "supervisor") {
   await page.goto("/login");
-  await page.getByLabel("Role").selectOption(role);
+  await page.getByLabel("Name").fill(role);
+  await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL("/");
 }

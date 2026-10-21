@@ -15,6 +15,7 @@ from recon_fixtures.families import make_specs, materialize
 from recon_provider.http import HttpConnector
 from recon_storage.models import Approval, Case, CaseMessage, Command, Plan
 from recon_storage.repos import new_id
+from recon_storage.users import ensure_demo_users
 from recon_verifier.checks import verify_case
 from recon_worker.dispatch import Dispatcher
 from recon_worker.executor import Executor
@@ -36,6 +37,7 @@ async def bw(app_sessions, flaky_sim, op, verifier_engines, mcp_read, clock, adk
             app_sessions, flaky_sim, op, verifier_engines["eval"], at, tenant=tenant, amount_minor=amount
         )
         mcp_read.read_keys[sd.tenant_id] = sd.read_key
+        await ensure_demo_users(app_sessions, T, [sd.tenant_id])
         return sd
 
     def conn(tenant: str) -> HttpConnector:

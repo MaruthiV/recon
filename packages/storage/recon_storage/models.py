@@ -525,3 +525,25 @@ class ApiRequest(Base):
     response: Mapped[dict[str, Any] | None]
     created_at: Mapped[datetime]
     __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True)
+    password_hash: Mapped[str]
+    failed_logins: Mapped[int] = mapped_column(Integer, server_default="0")
+    locked_until: Mapped[datetime | None]
+    created_at: Mapped[datetime]
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, primary_key=True)
+    role: Mapped[str]
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"]),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        CheckConstraint("role IN ('operator', 'supervisor')", name="role"),
+    )

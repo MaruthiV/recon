@@ -53,3 +53,14 @@ async def test_an_agent_run_records_traces_and_replays_them_without_sending_anyt
     assert r["reproduced"] and r["observed"]["decision"] == "AUTHORIZE"
     # replay is for debugging: the plan and its verdict come back, the provider never hears about it
     assert not [p for p in posts if p["method"] == "POST" and p["path"] == "/v1/refunds"]
+
+
+async def test_an_agent_plan_survives_a_crash_after_the_provider_commits(tmp_path):
+    # e2e faults: the plan comes from the agent path, the crash lands after the provider said yes
+    arm = Arm("graph", FAKE_MODEL, factory=scripted, price=FAKE_PRICING, fault="FP4")
+    async with world("benchtest") as w:
+        out = await run(w, "dev", arm, tmp_path, families={"duplicate_charge"}, limit=1)
+    [case] = list((out / "cases").iterdir())
+    r = json.loads((case / "case_result.json").read_text())
+    assert (r["crashes"], r["refunds_at_provider"], r["passed"]) == (1, 1, True)
+    assert json.loads((out / "manifest.json").read_text())["fault"] == "FP4"

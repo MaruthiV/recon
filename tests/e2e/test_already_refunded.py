@@ -58,10 +58,19 @@ async def test_a_made_up_refund_is_refused_not_told_to_the_customer(ar):
 async def test_a_refund_only_the_provider_knows_about_is_confirmed(ar, flaky_sim, op):
     sd, resolve, claim = ar
     t = {"account": sd.account, "api_key": sd.api_key}
-    await _provider_refund(flaky_sim, op, t, sd.duplicate_provider_id, 4900, pending=True)
+    await _provider_refund(flaky_sim, op, t, sd.duplicate_provider_id, 4900)
     case, plan, cmds = await resolve(claim)
     assert plan.decision == "NO_MONEY"
     assert (case.state, case.resolution) == (S.CLOSED.value, "ALREADY_REFUNDED") and cmds == []
+
+
+async def test_a_pending_refund_goes_to_a_person_not_closed(ar, flaky_sim, op):
+    sd, resolve, claim = ar
+    t = {"account": sd.account, "api_key": sd.api_key}
+    await _provider_refund(flaky_sim, op, t, sd.duplicate_provider_id, 4900, pending=True)
+    case, plan, cmds = await resolve(claim)
+    assert plan.decision == "ESCALATE" and "still pending" in plan.verdict["reasons"][0]
+    assert case.state == S.ESCALATED.value and cmds == []
 
 
 async def test_with_no_way_to_look_it_goes_to_a_person(ar):

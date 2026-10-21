@@ -14,6 +14,7 @@ from recon_fixtures.dup_charge import seed_duplicate_charge
 from recon_fixtures.families import TENANTS, make_specs, materialize
 from recon_retrieval.index import index_from_env
 from recon_storage.db import DbNames, make_engine, new_id, sessions, url
+from recon_storage.users import ensure_demo_users
 from recon_worker.app import TOKEN_HEADER
 from recon_worker.dispatch import Dispatcher, Sweeper
 
@@ -151,8 +152,11 @@ async def dev(names: DbNames, agent: str | None, web: bool, families: bool = Fal
                     log("seed", f"{row['tenant_id']:>16} {row['family']}/{row['variant']}  {row['case_id']}")
         if (indexed := await index_from_env(db)) is not None:
             log("seed", f"embedded {indexed} policy chunks, mcp-read searches hybrid")
+        await ensure_demo_users(db, datetime.now(UTC))
         log(
-            "ready", f"http://localhost:{PORTS['web']}/cases/{sd.case_id}  (sign in as any name, tenant {sd.tenant_id})"
+            "ready",
+            f"http://localhost:{PORTS['web']}/cases/{sd.case_id}  (sign in as operator or supervisor, tenant "
+            f"{sd.tenant_id}, password from RECON_DEMO_PASSWORD or the default in recon_storage/users.py)",
         )
 
         async with httpx.AsyncClient() as http:

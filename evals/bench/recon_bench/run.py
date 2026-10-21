@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from google.adk.models.base_llm import BaseLlm
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from recon_agents.meter import Budget, Pricing
 from recon_agents.replay import RecordingLlm, Tape, replay_models
@@ -24,6 +24,7 @@ from recon_storage.models import AuditEvent, Case, Command, CommandAttempt, Mode
 from recon_verifier.checks import verify_case
 from recon_worker.dispatch import Dispatcher
 from recon_worker.executor import Executor
+from recon_worker.faults import Faults, SimulatedCrash, raise_crash
 from recon_worker.investigate import AgentConfig, Investigator
 from recon_worker.pipeline import Pipeline
 from recon_worker.rules_planner import plan_by_rules
@@ -31,6 +32,8 @@ from recon_worker.rules_planner import plan_by_rules
 from .world import MCP_URL, RUN_KEY, T, World
 
 ARMS = ("rules", "graph", "single")
+# crash points armed in the db plus duplicate delivery, the ones that land after the plan exists
+FAULTS = ("FP2", "FP3", "FP4", "FP6")
 MONEY_CHECKS = ("3_amount", "4_provider_effect")
 
 
@@ -42,6 +45,7 @@ class Arm:
     budget: Budget = field(default_factory=Budget)
     factory: Callable[[str], BaseLlm] | None = None  # tests plug in a scripted model per role here
     price: Pricing | None = None
+    fault: str | None = None  # one of FAULTS, injected once per case
 
     def models(self, tape: Tape) -> Mapping[str, BaseLlm | str]:
         assert self.model is not None
@@ -105,7 +109,8 @@ async def run_case(w: World, spec: Spec, split: str, arm: Arm, out: Path) -> dic
             http_factory=w.http_factory,
         )
         inv = Investigator(w.db, w.clock, cfg, w.adk)
-    executor = Executor(w.db, w.clock, lambda _t: conn)
+    faults = Faults(w.db, enabled=True, on_hit=raise_crash) if arm.fault else Faults()
+    executor = Executor(w.db, w.clock, lambda _t: conn, faults=faults)
     if arm.replay is not None and inv is not None:
         # recorded replay is for debugging: rebuild the plan and its verdict, never touch the provider
         out_inv = await inv.investigate(sd.tenant_id, sd.case_id)
@@ -130,7 +135,11 @@ async def run_case(w: World, spec: Spec, split: str, arm: Arm, out: Path) -> dic
         d.mkdir(parents=True, exist_ok=True)
         (d / "case_result.json").write_text(json.dumps(result, indent=2, default=str) + "\n")
         return result
-    pipeline = Pipeline(w.db, w.clock, executor, inv, worker_id="bench", lease_seconds=1800)
+    pipeline = Pipeline(w.db, w.clock, executor, inv, worker_id="bench", lease_seconds=1800, faults=faults)
+    crashes = 0
+    if arm.fault in ("FP2", "FP3", "FP4"):
+        async with w.db() as s, s.begin():
+            await s.execute(text("INSERT INTO fault_points (point) VALUES (:p)"), {"p": arm.fault})
     if arm.name == "rules":
         async with w.db() as s:
             plan = await plan_by_rules(s, sd.tenant_id, sd.case_id, w.clock.now())
@@ -141,12 +150,26 @@ async def run_case(w: World, spec: Spec, split: str, arm: Arm, out: Path) -> dic
     async def deliver(d):
         return (await pipeline.advance(d.run_id, d.stage, d.event_id)).status
 
-    disp = Dispatcher(w.db, deliver)
+    disp = Dispatcher(w.db, deliver, duplicate=arm.fault == "FP6")
+
+    async def takeover():
+        # the dead worker's lease runs out and a fresh one picks the run up, without waiting it out for real
+        nonlocal pipeline, crashes
+        crashes += 1
+        async with w.db() as s, s.begin():
+            await s.execute(text("UPDATE runs SET lease_expires_at = now() WHERE case_id = :c"), {"c": sd.case_id})
+            await s.execute(text("UPDATE outbox_events SET available_at = now() WHERE dispatched_at IS NULL"))
+        pipeline = Pipeline(
+            w.db, w.clock, executor, inv, worker_id=f"bench-{crashes + 1}", lease_seconds=1800, faults=faults
+        )
 
     async def drain():
         for _ in range(60):
-            if await disp.pump_once() == 0:
-                return
+            try:
+                if await disp.pump_once() == 0:
+                    return
+            except SimulatedCrash:
+                await takeover()
 
     await drain()
     approved = False
@@ -212,6 +235,13 @@ async def run_case(w: World, spec: Spec, split: str, arm: Arm, out: Path) -> dic
         "money_safe": all(c.ok for c in v.checks if c.name in MONEY_CHECKS) or bool(sd.label.get("financial")),
         "wrong_close": not v.passed and case.state == "CLOSED",
         "approved_by_supervisor": approved,
+        "fault": arm.fault,
+        "crashes": crashes,
+        "refunds_at_provider": sum(
+            1
+            for r in final["refunds"]
+            if r["payment_intent"] in sd.label["case_payment_intents"] and r["status"] != "failed"
+        ),
         "investigation": agent_runs[-1].investigation if agent_runs else None,
         "failure": agent_runs[-1].failure if agent_runs else None,
         "agent_runs": len(agent_runs),
@@ -295,6 +325,7 @@ async def run(
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     tag = "replay" if arm.replay else (arm.model or "").replace(":", "_").replace("/", "_")
     label = arm.name if arm.name == "rules" else f"{arm.name}-{tag}"
+    label += f"-{arm.fault}" if arm.fault else ""
     out = out_root / f"{stamp}-{split}-{label}"
     out.mkdir(parents=True)
     wf = workflow_version(arm.models(Tape({}))) if arm.name != "rules" and arm.model and arm.replay is None else None
@@ -311,6 +342,7 @@ async def run(
         if arm.name != "rules"
         else None,
         "budget": arm.budget.as_dict(),
+        "fault": arm.fault,
         "pricing": arm.pricing().snapshot if arm.name != "rules" else None,
         "business_time": T.isoformat(),
         "started_at": datetime.now(UTC).isoformat(),

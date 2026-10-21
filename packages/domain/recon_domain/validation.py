@@ -343,10 +343,14 @@ def _already_refunded(plan: ResolutionPlan, facts: CaseFacts) -> Verdict:
     seen = None if facts.provider_refunds is None else facts.provider_refunds.get(payment.id)
     if seen is None:
         return Verdict(Decision.ESCALATE, (f"can't confirm a refund on {payment.id} without a provider read",))
-    if any(st not in ("failed", "canceled") for st in seen):
+    if "succeeded" in seen:
         return Verdict(
             Decision.NO_MONEY, ("ALREADY_REFUNDED moves no money", f"provider shows a refund on {payment.id}")
         )
+    # pending isn't done, and nothing here watches a refund recon didn't send, so a person does
+    live = [st for st in seen if st not in ("failed", "canceled")]
+    if live:
+        return Verdict(Decision.ESCALATE, (f"the refund on {payment.id} is still {live[0]} at the provider",))
     return _reject(f"no refund exists on {payment.id}")
 
 

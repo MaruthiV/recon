@@ -440,8 +440,12 @@ def refunded_claim(**kw):
     [
         # recon's own ledger already shows money going back
         (facts(payments=(pay("pay_a", 0), pay("pay_b", 3, refunded_minor=4900))), Decision.NO_MONEY, "ledger"),
-        # a refund only the provider knows about, pending counts
-        (facts(provider_refunds={"pay_b": ("pending",)}), Decision.NO_MONEY, "provider shows"),
+        # a refund only the provider knows about
+        (facts(provider_refunds={"pay_b": ("succeeded",)}), Decision.NO_MONEY, "provider shows"),
+        (facts(provider_refunds={"pay_b": ("failed", "succeeded")}), Decision.NO_MONEY, "provider shows"),
+        # still pending can still fail, and nobody would notice after a close
+        (facts(provider_refunds={"pay_b": ("pending",)}), Decision.ESCALATE, "still pending"),
+        (facts(provider_refunds={"pay_b": ("failed", "requires_action")}), Decision.ESCALATE, "still requires_action"),
         # the model said refunded, nothing anywhere says so
         (facts(provider_refunds={"pay_b": ()}), Decision.REJECT, "no refund exists"),
         (facts(provider_refunds={"pay_b": ("failed",)}), Decision.REJECT, "no refund exists"),

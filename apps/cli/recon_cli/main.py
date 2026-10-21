@@ -29,6 +29,7 @@ from recon_provider.http import HttpConnector, HttpRefundReader
 from recon_retrieval.embed import embedder_from_env
 from recon_retrieval.index import index_from_env
 from recon_storage.db import DbNames, make_engine, new_id, sessions, url
+from recon_storage.users import ensure_demo_users
 from recon_worker.executor import Executor
 from recon_worker.investigate import AgentConfig, Investigator, resolve_case
 
@@ -64,6 +65,7 @@ async def seed(args: argparse.Namespace) -> None:
                 ids=seeded_ids(args.seed) if args.seed else new_id,
             )
         indexed = await index_from_env(sessions(app_engine))
+        await ensure_demo_users(sessions(app_engine), datetime.now(UTC), [sd.tenant_id])
     finally:
         await app_engine.dispose()
         await eval_engine.dispose()
@@ -209,11 +211,16 @@ async def evaluate(args: argparse.Namespace) -> int:
     if live and not live_allowed():
         print("refusing: gemini calls need RECON_LIVE=1 and GEMINI_API_KEY")
         return 2
+    # held_out runs once per config in m6, before that only the 5-case smoke
+    if args.split == "held_out" and os.environ.get("RECON_HELD_OUT") != "1" and not (args.limit and args.limit <= 5):
+        print("refusing: held_out needs --limit 5 or less until m6 (RECON_HELD_OUT=1)")
+        return 2
     arm = Arm(
         args.arm,
         args.model,
         Path(args.replay) if args.replay else None,
         Budget(max_model_calls=args.calls, max_tool_calls=args.calls + 2, max_seconds=900),
+        fault=args.fault,
     )
     # one line per case is the progress, not every http request
     for name in ("httpx", "httpx2", "mcp", "google_adk", "google"):
@@ -271,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--families", action="store_true", help="also seed one case per workflow variant (t_demo_* tenants)")
     sub.add_parser("index", help="embed policy chunks for hybrid search (needs RECON_EMBED_MODEL)")
     ev = sub.add_parser("eval", help="run one arm over a frozen split, writing spec §20 artifacts per case")
-    ev.add_argument("--split", choices=["dev", "val"], default="dev")  # held_out waits for m6
+    ev.add_argument("--split", choices=["dev", "val", "held_out"], default="dev")
     ev.add_argument("--arm", choices=["rules", "graph", "single"], default="rules")
     ev.add_argument("--model", help="ollama:<tag> (free, local) or a gemini id (needs RECON_LIVE=1)")
     ev.add_argument("--replay", help="a previous run dir: recorded traces, validation only, nothing sent")
@@ -279,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--only", help="comma-separated case seeds, to re-run single cases from a manifest")
     ev.add_argument("--limit", type=int)
     ev.add_argument("--calls", type=int, default=10, help="model call budget per case")
+    ev.add_argument("--fault", choices=["FP2", "FP3", "FP4", "FP6"], help="inject this fault once per case")
     ev.add_argument("--out", default="results/eval")
     b3 = sub.add_parser(
         "b3", help="naive direct-tool agent under provider faults (no ledger), counts duplicate refunds"

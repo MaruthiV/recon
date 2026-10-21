@@ -1,5 +1,8 @@
 // readme screenshots from the real local stack (recon dev must be up), run: node scripts/screenshots.mjs [names]
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "@playwright/test";
 
 const out = new URL("../../../assets/", import.meta.url).pathname;
@@ -14,11 +17,17 @@ function seed(amount = 4900) {
   return JSON.parse(text.trim().split("\n").at(-1)).case_id;
 }
 
+const password = execFileSync(
+  "uv",
+  ["run", "python", "-c", "from recon_storage.users import demo_password; print(demo_password())"],
+  { cwd: new URL("../../../", import.meta.url).pathname, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+).trim();
+
 async function login(page, role, tenant = "t_acme") {
   await page.goto(`${base}/login`);
-  await page.getByLabel("Name").fill("maruthi");
+  await page.getByLabel("Name").fill(role);
+  await page.getByLabel("Password").fill(password);
   await page.getByLabel("Tenant").fill(tenant);
-  await page.getByLabel("Role").selectOption(role);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(`${base}/`);
 }
@@ -82,6 +91,34 @@ if (want("benchmarks")) {
   await page.getByRole("button", { name: /rules: \d+ misses/ }).waitFor({ timeout: 30_000 });
   await page.waitForTimeout(1000);
   await shot("benchmarks");
+}
+
+// 5. the same crash as a gif: a frame every half second from the click to the close, stitched with imagemagick
+if (want("demo")) {
+  const id = seed();
+  await login(page, "operator");
+  await page.goto(`${base}/cases/${id}`);
+  await page.addStyleTag({ content: "nextjs-portal{display:none!important}" });
+  const frames = mkdtempSync(join(tmpdir(), "recon-demo-"));
+  let n = 0;
+  const frame = async () => page.screenshot({ path: join(frames, `${String(n++).padStart(3, "0")}.png`) });
+  await frame();
+  await frame();
+  await page.getByRole("button", { name: /Kill the worker after the provider commits/ }).click();
+  await frame();
+  await page.getByRole("button", { name: "Investigate (rules, no model)" }).click();
+  const closed = page.getByText("CLOSED · REFUNDED").first();
+  for (let i = 0; i < 120 && !(await closed.isVisible()); i++) {
+    await frame();
+    await page.waitForTimeout(500);
+  }
+  await page.waitForTimeout(800);
+  for (let i = 0; i < 6; i++) await frame(); // hold on the end state
+  execFileSync("magick", [
+    "-delay", "50", "-loop", "0", join(frames, "*.png"),
+    "-resize", "1100x", "-colors", "96", "-layers", "Optimize", `${out}/crash-recovery.gif`,
+  ]);
+  rmSync(frames, { recursive: true });
 }
 
 await browser.close();

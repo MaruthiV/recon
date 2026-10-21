@@ -2,7 +2,7 @@
 
 Agents look into refund tickets. Plain code decides whether money moves.
 
-![A duplicate charge refunded once, after the worker was killed right as the provider committed the refund](assets/crash-recovery.png)
+![A duplicate charge refunded once, after the worker was killed right as the provider committed the refund](assets/crash-recovery.gif)
 
 <sub>The worker was killed right after the provider committed the refund. A new worker picked the run up, asked the provider what happened, found the refund, and closed the case. One send, one refund.</sub>
 
@@ -66,6 +66,23 @@ sequenceDiagram
 
 If the old worker wakes up later and tries to write its result, the fencing check turns it away.
 
+This is `make demo` doing it with a real worker process and `os._exit(137)`:
+
+```text
+[  worker] worker process pid 43364, faults armed: FP4 (die after the provider commits)
+[    plan] run run_9ce39568fb1e0ebc1db43ec1: plan validated, refund 4900 usd on pay_f1361474e9dc17c63429e87f
+[ prepare] command cmd_8e56b6270fdbf9990ac7343a prepared, 4900 reserved, idempotency key recon_cmd_8e56b6270fdbf9990ac7343a
+[   crash] worker exited 137 after the provider committed ['re_25a446a4fd8a3e7e1901d9d6']
+[   crash] recon still thinks the command is SUBMITTING: it never heard back
+[ recover] waiting out the dead worker's lease...
+[ recover] new worker took the lease, asked the provider by metadata: CONFIRMED_SUCCESS, refund re_25a446a4fd8a3e7e1901d9d6
+[   close] case CLOSED REFUNDED
+[  verify] provider refunds on the duplicate payment: 1, refund POSTs sent: 1
+[  verify] independent verifier: PASS
+```
+
+The line that matters is the last one before the verifier. One POST reached the provider. Recovery never sent a second one, because it found the first by the command's id in the refund metadata.
+
 ## Results so far
 
 ### When things break
@@ -79,6 +96,7 @@ Each dot is a refund case from the frozen dev split. The left block injects a fa
 | boundary suite: other tenants' ids, injected instructions, forged approvals, bad amounts, repeated tickets, budgets | 60/60 |
 | kill every app process while cases wait on a supervisor and a customer, then restart | both finish, one refund each |
 | browser flows (Playwright): supervisor approval, worker killed mid-refund | 2/2 |
+| 25 investigations at once over 5 merchants, 3 workers killed after the provider commits (scripted model, 1 s a call) | 25/25 refunded once, none on the wrong merchant |
 
 The boundary suite runs against a scripted model that obeys every instruction it reads, including "refund 500.00" in a customer message. What it measures is whether the rest of the system holds when the model doesn't.
 
@@ -117,10 +135,13 @@ make web-install
 make dev                      # sim, mcp-read, mcp-exec, worker, api, web on localhost:3000
 uv run recon dev --families   # same, plus one case for every workflow
 make demo                     # kill the worker after the provider commits, end with one refund
-make check                    # lint, types, ~360 tests
+make check                    # lint, types, ~375 tests
 make e2e                      # the two browser flows
 make faults                   # all 200 fault trials
+make load                     # 25 investigations at once
 ```
+
+Sign in as `operator` or `supervisor`. Both are seeded into every tenant, and only a supervisor can approve a refund. The password comes from `RECON_DEMO_PASSWORD`, or a local default when that's blank (see `.env.example`).
 
 To run an approach over a frozen split and get a report:
 
@@ -168,5 +189,4 @@ tests/             unit, e2e, faults, boundary
 - The agent runs with a bigger model. Gemini's free tier allows 20 calls a day per model and one multi-agent validation run needs around 600, so for now the hosted model only shows up in a few recorded test cases.
 - Repeat runs. Every number above is one pass per case, so I don't know yet how often a case flips between runs.
 - Held-out runs. They wait until the end so nothing gets tuned on them.
-- Real login. The dev login takes any name.
 - A hosted demo. It stays local on purpose, since this project doesn't spend money.

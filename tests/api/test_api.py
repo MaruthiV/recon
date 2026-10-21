@@ -8,6 +8,7 @@ from sqlalchemy import text
 from recon_api.app import create_app
 from recon_fixtures.dup_charge import seed_duplicate_charge
 from recon_provider.http import HttpConnector
+from recon_storage.users import demo_password, ensure_demo_users
 from recon_verifier.checks import verify_case
 from recon_worker.dispatch import Dispatcher
 from recon_worker.executor import Executor
@@ -21,6 +22,7 @@ KEY = b"test-session-key"
 async def api(app_sessions, flaky_sim, op, verifier_engines, clock):
     acme = await seed_duplicate_charge(app_sessions, flaky_sim, op, verifier_engines["eval"], T, tenant="acme")
     globex = await seed_duplicate_charge(app_sessions, flaky_sim, op, verifier_engines["eval"], T, tenant="globex")
+    await ensure_demo_users(app_sessions, T)
     app = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=True)
     conn = HttpConnector(flaky_sim, acme.api_key)
     worker = Pipeline(
@@ -58,8 +60,8 @@ async def version(c, cid) -> int:
 
 
 async def login(c, tenant="t_acme", role="operator"):
-    r = await c.post("/v1/login", json={"user": "maruthi", "tenant_id": tenant, "role": role})
-    assert r.status_code == 200
+    r = await c.post("/v1/login", json={"user": role, "password": demo_password(), "tenant_id": tenant})
+    assert r.status_code == 200, r.text
 
 
 async def test_everything_needs_a_session(api):
@@ -119,10 +121,11 @@ async def test_sse_resumes_from_last_event_id(api):
     assert resumed == [i for i in everything if i > mid]
 
 
-async def test_login_and_fault_controls_are_dev_only(app_sessions, clock, api):
+async def test_fault_controls_are_dev_only_and_login_is_real_everywhere(app_sessions, clock, api):
     public = create_app(app_sessions, clock, KEY, dev=False, faults_enabled=False)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=public), base_url="http://api") as c:
-        assert (await c.post("/v1/login", json={"user": "x", "tenant_id": "t_acme"})).status_code == 404
+    async with client(public) as c:
+        await login(c)
+        assert (await c.post("/internal/demo/faults", json={"point": "FP4"})).status_code == 404
     await login(api.c)
     assert (await api.c.post("/internal/demo/faults", json={"point": "FP4"})).status_code == 200
     quiet = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=False)
@@ -139,6 +142,7 @@ async def test_only_a_supervisor_approves_and_only_the_plan_they_saw(
     sd = await seed_duplicate_charge(
         app_sessions, flaky_sim, op, verifier_engines["eval"], T, tenant="hooli", amount_minor=25_000
     )
+    await ensure_demo_users(app_sessions, T)
     app = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=False)
     conn = HttpConnector(flaky_sim, sd.api_key)
     worker = Pipeline(app_sessions, clock, Executor(app_sessions, clock, lambda _t: conn), worker_id="w")
@@ -301,6 +305,7 @@ async def test_benchmarks_list_finished_runs_and_nothing_else(app_sessions, cloc
                 "INSERT INTO tenants (id, name, provider_account, created_at) VALUES ('t_acme', 'Acme', 'acct_acme', now())"
             )
         )
+    await ensure_demo_users(app_sessions, T)
     app = create_app(app_sessions, clock, KEY, dev=True, faults_enabled=False, results=tmp_path)
     async with client(app) as c:
         assert (await c.get("/v1/benchmarks")).status_code == 401

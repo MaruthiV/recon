@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from recon_fixtures.dup_charge import seed_duplicate_charge
 from recon_storage.db import url
+from recon_storage.users import demo_password, ensure_demo_users
 from recon_verifier.checks import verify_case
 from recon_worker.app import TOKEN_HEADER
 from recon_worker.dispatch import Dispatcher
@@ -23,6 +24,7 @@ async def test_waiting_cases_survive_killing_every_app_process(procs, app_sessio
     async with httpx.AsyncClient(base_url=sim_srv.url) as sim:
         big = await seed_duplicate_charge(app_sessions, sim, op, verifier_engines["eval"], T, amount_minor=25_000)
         quiet = await seed_duplicate_charge(app_sessions, sim, op, verifier_engines["eval"], T, tenant="globex")
+        await ensure_demo_users(app_sessions, T)
     # the second customer never said which order, so the case will wait on them
     async with app_sessions() as s, s.begin():
         await s.execute(text("UPDATE cases SET order_id = NULL WHERE id = :c"), {"c": quiet.case_id})
@@ -65,8 +67,8 @@ async def test_waiting_cases_survive_killing_every_app_process(procs, app_sessio
         return httpx.AsyncClient(base_url=api.url, event_hooks={"request": [with_key]})
 
     async def login(c, tenant, role="operator"):
-        r = await c.post("/v1/login", json={"user": "sam", "tenant_id": tenant, "role": role})
-        assert r.status_code == 200
+        r = await c.post("/v1/login", json={"user": role, "password": demo_password(), "tenant_id": tenant})
+        assert r.status_code == 200, r.text
 
     worker, api = stack()
     for sd in (big, quiet):
