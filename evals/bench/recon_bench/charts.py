@@ -5,10 +5,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .report import load
+from .report import across, load
 
 # hand-rolled svg so the readme charts come straight from result files, no plotting deps
-GREEN, AMBER, RED, GREY, INK, MUTED = "#2f855a", "#c27c0e", "#c53030", "#d7d7d2", "#1f2328", "#6b6f76"
+GREEN, LIGHT, AMBER, RED, GREY = "#2f855a", "#9fd0ae", "#c27c0e", "#c53030", "#d7d7d2"
+INK, MUTED = "#1f2328", "#6b6f76"
 FONT = "font-family='-apple-system, Segoe UI, Helvetica, Arial, sans-serif'"
 
 
@@ -67,30 +68,44 @@ def fault_matrix(rows: list[dict[str, Any]], path: Path) -> None:
     path.write_text(_svg(left + 22 * dx + 70, h, body, f"Fault recovery: {ok}/{n} trials, plus {n} controls"))
 
 
-def outcome_bars(arms: list[tuple[str, list[dict[str, Any]]]], path: Path, title: str) -> None:
-    # per arm: right answer, sent to a person, wrong answer to the customer
+def outcome_bars(arms: list[tuple[str, list[list[dict[str, Any]]]]], path: Path, title: str) -> None:
+    # per arm, each case across every pass: right each time, right only sometimes, never right, closed wrongly
     left, top, bar_w, row_h = 190, 92, 560, 46
-    body = _legend(24, 64, [("right outcome", GREEN), ("missed, left open", AMBER), ("wrong answer, closed", RED)])
-    for i, (name, rows) in enumerate(arms):
-        n = len(rows)
-        ok = sum(r["passed"] for r in rows)
-        wrong = sum(r["wrong_close"] for r in rows)
-        rest = n - ok - wrong
+    k = max(len(runs) for _, runs in arms)
+    legend = [("right every pass" if k > 1 else "right outcome", GREEN)]
+    legend += [("right in some passes", LIGHT)] if k > 1 else []
+    legend += [("missed, left open", AMBER), ("closed wrongly" + (" at least once" if k > 1 else ""), RED)]
+    body = _legend(24, 64, legend)
+    for i, (name, runs) in enumerate(arms):
+        per = across(runs).values()
+        n = len(per)
+        wrong = sum(any(r["wrong_close"] for r in v) for v in per)
+        every = sum(all(r["passed"] for r in v) for v in per)
+        some = sum(
+            any(r["passed"] for r in v) and not all(r["passed"] for r in v)
+            for v in per
+            if not any(r["wrong_close"] for r in v)
+        )
+        rest = n - every - some - wrong
         y = top + i * row_h
         body.append(f"<text x='24' y='{y + 19}' font-size='14' fill='{INK}'>{name}</text>")
         x = left
-        for count, color in ((ok, GREEN), (rest, AMBER), (wrong, RED)):
+        for count, color in ((every, GREEN), (some, LIGHT), (rest, AMBER), (wrong, RED)):
             w = bar_w * count / n if n else 0
             if w:
                 body.append(f"<rect x='{x:.1f}' y='{y}' width='{w:.1f}' height='26' fill='{color}'/>")
             x += w
-        body.append(f"<text x='{left + bar_w + 12}' y='{y + 19}' font-size='13.5' fill='{INK}'>{ok}/{n}</text>")
-    path.write_text(_svg(left + bar_w + 80, top + len(arms) * row_h + 10, body, title))
+        passes = sorted(sum(r["passed"] for r in rows) for rows in runs)
+        note = f"<tspan font-weight='600'>{every}/{n}</tspan>"
+        if passes[0] != passes[-1]:
+            note += f"<tspan fill='{MUTED}'>  ({passes[0]} to {passes[-1]} a pass)</tspan>"
+        body.append(f"<text x='{left + bar_w + 12}' y='{y + 19}' font-size='13.5' fill='{INK}'>{note}</text>")
+    path.write_text(_svg(left + bar_w + 180, top + len(arms) * row_h + 10, body, title))
 
 
-def family_grid(arms: list[tuple[str, list[dict[str, Any]]]], path: Path, title: str) -> None:
-    # per family, per arm: share right, as a shaded cell with the count in it
-    fams = sorted({r["family"] for _, rows in arms for r in rows})
+def family_grid(arms: list[tuple[str, list[list[dict[str, Any]]]]], path: Path, title: str) -> None:
+    # per family, per arm: cases right every pass, as a shaded cell with the count in it
+    fams = sorted({r["family"] for _, runs in arms for rows in runs for r in rows})
     left, top, cw, ch = 210, 84, 150, 34
     body = []
     for j, (name, _) in enumerate(arms):
@@ -100,9 +115,9 @@ def family_grid(arms: list[tuple[str, list[dict[str, Any]]]], path: Path, title:
     for i, fam in enumerate(fams):
         y = top + i * ch
         body.append(f"<text x='24' y='{y + 22}' font-size='13.5' fill='{INK}'>{fam.replace('_', ' ')}</text>")
-        for j, (_, rows) in enumerate(arms):
-            mine = [r for r in rows if r["family"] == fam]
-            ok, n = sum(r["passed"] for r in mine), len(mine)
+        for j, (_, runs) in enumerate(arms):
+            mine = [v for v in across(runs).values() if v[0]["family"] == fam]
+            ok, n = sum(all(r["passed"] for r in v) for v in mine), len(mine)
             share = ok / n if n else 0
             color = GREEN if share >= 0.9 else AMBER if share >= 0.5 else RED
             x = left + j * cw
@@ -148,7 +163,9 @@ def duplicate_bars(rows: list[dict[str, Any]], path: Path, model: str | None = N
     path.write_text(_svg(left + bar_w + 190, top + len(labels) * row_h + 10, body, title))
 
 
-def from_results(root: Path, out: Path, val_runs: dict[str, Path] | None = None, b3: Path | None = None) -> list[Path]:
+def from_results(
+    root: Path, out: Path, val_runs: dict[str, list[Path]] | None = None, b3: Path | None = None
+) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     made = []
     e3 = root / "faults" / "e3.jsonl"
@@ -157,10 +174,15 @@ def from_results(root: Path, out: Path, val_runs: dict[str, Path] | None = None,
         fault_matrix(rows, out / "fault-recovery.svg")
         made.append(out / "fault-recovery.svg")
     if val_runs:
-        arms = [(name, load(d)[1]) for name, d in val_runs.items()]
-        n = len(arms[0][1])
-        outcome_bars(arms, out / "validation.svg", f"Validation split, {n} cases")
-        family_grid(arms, out / "families.svg", "Right outcome by case family")
+        arms = [(name, [load(d)[1] for d in dirs]) for name, dirs in val_runs.items()]
+        n = len(across(arms[0][1]))
+        k = max(len(runs) for _, runs in arms)
+        passes = {2: "two", 3: "three"}.get(k, str(k))
+        title = f"Validation split, {n} cases" + (f", {passes} passes each" if k > 1 else "")
+        outcome_bars(arms, out / "validation.svg", title)
+        family_grid(
+            arms, out / "families.svg", "Right every pass, by case family" if k > 1 else "Right outcome by case family"
+        )
         made += [out / "validation.svg", out / "families.svg"]
     if b3 is not None:
         meta = json.loads((b3 / "manifest.json").read_text()) if (b3 / "manifest.json").exists() else {}

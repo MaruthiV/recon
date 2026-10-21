@@ -295,7 +295,12 @@ def main(argv: list[str] | None = None) -> int:
     b3.add_argument("--instances", type=int, default=10)
     b3.add_argument("--out", default="results/b3")
     ch = sub.add_parser("charts", help="readme charts (svg) from result files")
-    ch.add_argument("--val", nargs="*", default=[], help="name=run_dir pairs, e.g. rules=results/eval/...")
+    ch.add_argument(
+        "--val",
+        nargs="*",
+        default=[],
+        help="name=run_dir pairs, comma separate repeats, e.g. rules=results/eval/a,results/eval/b",
+    )
     ch.add_argument("--b3", help="a results/b3/<stamp> dir")
     ch.add_argument("--out", default="assets")
     rp = sub.add_parser("report", help="aggregate eval runs, side by side")
@@ -319,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         made = from_results(
             Path("results"),
             Path(args.out),
-            {k: Path(v) for k, v in runs.items()} or None,
+            {k: [Path(d) for d in v.split(",")] for k, v in runs.items()} or None,
             Path(args.b3) if args.b3 else None,
         )
         print("\n".join(str(m) for m in made))

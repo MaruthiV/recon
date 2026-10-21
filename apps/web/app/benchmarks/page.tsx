@@ -36,33 +36,45 @@ export default function Benchmarks() {
       .catch((e) => (e instanceof NotSignedIn ? router.push("/login") : setError(String(e))));
   }, [router]);
 
-  // the newest run of each arm on the newest validation split, so stale runs don't sneak into the comparison
-  const shown = useMemo(() => {
-    if (!rows?.length) return [];
+  // the newest run of each arm on the newest validation split, so stale runs don't sneak into the comparison,
+  // plus every pass of that arm on the same split for the repeat rows
+  const { shown, passes } = useMemo(() => {
+    const passes: Record<string, BenchmarkRow[]> = {};
+    if (!rows?.length) return { shown: [], passes };
     const val = rows.filter((r) => r.split === "val");
     const pool = val.length ? val : rows;
     const split = pool[0].split_sha256;
     // a run filtered to a few families isn't comparable to a full one
     const full = Math.max(...pool.filter((r) => r.split_sha256 === split).map((r) => r.n));
-    const seen = new Set<string>();
-    return pool
+    const shown = pool
       .filter((r) => {
+        if (r.split_sha256 !== split || r.n !== full) return false;
         const key = `${r.arm}|${r.model}`;
-        if (r.split_sha256 !== split || r.n !== full || seen.has(key)) return false;
-        seen.add(key);
-        return true;
+        passes[key] = [...(passes[key] ?? []), r];
+        return passes[key].length === 1;
       })
       .sort((a, b) => ARM_ORDER.indexOf(a.arm) - ARM_ORDER.indexOf(b.arm));
+    return { shown, passes };
   }, [rows]);
+  const group = (r: BenchmarkRow) => passes[`${r.arm}|${r.model}`] ?? [r];
+  const repeated = shown.some((r) => group(r).length > 1);
+
+  // a case counts only if no pass missed it
+  function everyPass(runs: BenchmarkRow[]) {
+    const reps = runs.map((p) => reports[p.id]);
+    if (reps.some((x) => !x)) return "…";
+    const missed = new Set(reps.flatMap((x) => x.failures.map((f) => f.seed)));
+    return `${runs[0].n - missed.size}/${runs[0].n}`;
+  }
 
   useEffect(() => {
-    for (const r of shown) {
+    for (const r of Object.values(passes).flat()) {
       if (reports[r.id]) continue;
       api<{ report: BenchmarkReport }>(`/v1/benchmarks/${r.id}`)
         .then((d) => setReports((all) => ({ ...all, [r.id]: d.report })))
         .catch((e) => setError(String(e)));
     }
-  }, [shown, reports]);
+  }, [passes, reports]);
 
   const families = useMemo(
     () => [...new Set(Object.values(reports).flatMap((r) => Object.keys(r.per_family)))].sort(),
@@ -89,6 +101,7 @@ export default function Benchmarks() {
           <h2>
             {shown[0].split} split · {shown[0].n} cases · <code>{shown[0].split_sha256.slice(0, 12)}</code>
           </h2>
+          {repeated && <p className="muted">The first two rows count every pass on this split. Everything else on the page is the newest pass.</p>}
           <div className="scroll">
             <table className="compare">
               <thead>
@@ -100,6 +113,29 @@ export default function Benchmarks() {
                 </tr>
               </thead>
               <tbody>
+                {repeated && (
+                  <>
+                    <tr>
+                      <td className="muted">right every pass</td>
+                      {shown.map((r) => (
+                        <td key={r.id} className="num">
+                          {everyPass(group(r))}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td className="muted">right, pass by pass</td>
+                      {shown.map((r) => (
+                        <td key={r.id} className="num">
+                          {group(r)
+                            .map((p) => p.passed)
+                            .reverse()
+                            .join(", ")}
+                        </td>
+                      ))}
+                    </tr>
+                  </>
+                )}
                 {(
                   [
                     ["right outcome", (b: BenchmarkReport) => `${b.passed}/${b.n} (${pct(b.task_success)})`],

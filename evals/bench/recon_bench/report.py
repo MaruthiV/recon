@@ -109,9 +109,71 @@ def markdown(summaries: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def across(runs: list[list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    # one case's rows from every pass, only cases every pass ran
+    per: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for rows in runs:
+        for r in rows:
+            per[r["seed"]].append(r)
+    return {s: v for s, v in per.items() if len(v) == len(runs)}
+
+
+def repeats(run_dirs: list[Path]) -> list[dict[str, Any]]:
+    # the same arm on the same split more than once: right every pass (pass^k), right at least once, what flips
+    groups: dict[tuple[str, str | None, str], list[list[dict[str, Any]]]] = defaultdict(list)
+    for d in run_dirs:
+        m, rows = load(d)
+        groups[(m["arm"], m["model"], m["split_sha256"])].append(rows)
+    out = []
+    for (arm, model, _), runs in groups.items():
+        if len(runs) < 2:
+            continue
+        per = across(runs)
+        every = [all(r["passed"] for r in v) for v in per.values()]
+        once = [any(r["passed"] for r in v) for v in per.values()]
+        out.append(
+            {
+                "arm": arm,
+                "model": model,
+                "k": len(runs),
+                "n": len(per),
+                "per_pass": [sum(r["passed"] for r in rows) for rows in runs],
+                "every_pass": sum(every),
+                "every_pass_ci95": list(ci(every)),
+                "at_least_once": sum(once),
+                "wrong_close_at_least_once": sum(any(r["wrong_close"] for r in v) for v in per.values()),
+                "flips": sorted(s for s, v in per.items() if len({r["passed"] for r in v}) > 1),
+            }
+        )
+    return out
+
+
+def repeats_markdown(reps: list[dict[str, Any]]) -> str:
+    head = ["", *[" ".join(x for x in (r["arm"], r["model"], f"×{r['k']}") if x) for r in reps]]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    rows = [
+        ("right per pass", lambda r: ", ".join(map(str, r["per_pass"]))),
+        (
+            "right every pass",
+            lambda r: (
+                f"{r['every_pass']}/{r['n']} (95% CI {r['every_pass_ci95'][0]:.0%}–{r['every_pass_ci95'][1]:.0%})"
+            ),
+        ),
+        ("right at least once", lambda r: f"{r['at_least_once']}/{r['n']}"),
+        ("closed wrongly at least once", lambda r: f"{r['wrong_close_at_least_once']}/{r['n']}"),
+        ("cases that flip", lambda r: str(len(r["flips"]))),
+    ]
+    for label, f in rows:
+        lines.append("| " + " | ".join([label, *[f(r) for r in reps]]) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def report(run_dirs: list[Path], out: Path | None = None) -> str:
     summaries = [summarize(d) for d in run_dirs]
     md = markdown(summaries)
+    reps = repeats(run_dirs)
+    if reps:
+        md += "\n" + repeats_markdown(reps)
     for d, s in zip(run_dirs, summaries, strict=True):
         (d / "report.json").write_text(json.dumps(s, indent=2) + "\n")
         (d / "summary.md").write_text(markdown([s]))

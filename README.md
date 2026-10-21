@@ -97,24 +97,35 @@ Each dot is a refund case from the frozen dev split. The left block injects a fa
 | kill every app process while cases wait on a supervisor and a customer, then restart | both finish, one refund each |
 | browser flows (Playwright): supervisor approval, worker killed mid-refund | 2/2 |
 | 25 investigations at once over 5 merchants, 3 workers killed after the provider commits (scripted model, 1 s a call) | 25/25 refunded once, none on the wrong merchant |
+| the real agent path with the local model, 5 cases under each of four faults: a crash after prepare, before the send, after the provider commits, and every event delivered twice | 19/20 right, one handed to a person, no refund sent twice or wrongly |
 
 The boundary suite runs against a scripted model that obeys every instruction it reads, including "refund 500.00" in a customer message. What it measures is whether the rest of the system holds when the model doesn't.
 
 ### Agents against plain rules
 
-The same 70 validation cases, run three ways. Rules is the baseline with no model at all, just the policy math. Multi-agent is the graph in the diagram up top. Single agent is one model holding every read tool. Both agent setups run qwen3:4b-instruct through Ollama on my laptop, because that's what's free.
+The same 70 validation cases, run three ways, three times each. Rules is the baseline with no model at all, just the policy math. Multi-agent is the graph in the diagram up top. Single agent is one model holding every read tool. Both agent setups run qwen3:4b-instruct through Ollama on my laptop, because that's what's free.
 
-![Right outcome on 70 validation cases: rules 57, multi-agent 49, single agent 40](assets/validation.svg)
+![Right every pass on 70 validation cases: rules 57, multi-agent 48, single agent 33](assets/validation.svg)
 
-Rules win. That's less surprising than it looks. The labels come from the same policy math the rules use, so in most families a model has nothing to add and plenty to get wrong. What I watch more closely is where the misses land. Amber is a case the agent couldn't finish and left for a person. Red is a customer who got the wrong answer.
+| | rules | multi-agent | single agent |
+|---|---|---|---|
+| right, pass by pass | 57, 57, 57 | 52, 53, 50 | 46, 45, 46 |
+| right every pass | 57 | 48 | 33 |
+| right at least once | 57 | 54 | 58 |
+| cases that flip | 0 | 6 | 25 |
+| median time a case | instant | 108 s | 29 s |
 
-![Right outcome by case family for each approach](assets/families.svg)
+Rules win. That's less surprising than it looks. The labels come from the same policy math the rules use, so in most families a model has nothing to add and plenty to get wrong. What I watch more closely is where the misses land. Amber is a case the agent couldn't finish and left for a person. Red is a customer who got the wrong answer at least once.
 
-All the red sits in one row. "Message matters" is the family where the records say refund but the customer's message changes that: they've already disputed the charge with their bank, or they say they sent back two of something the warehouse logged as one. Rules can't read, so they refund all ten. Across the other 60 cases, neither agent setup closed a single one wrongly. When the small model got lost it ran out of turns or handed the case over, and the validator turned away plans that claimed the wrong outcome.
+Running everything three times changed how I read the two agent setups. One pass at a time they look about 6 cases apart. Count only the cases each got right all three times and the gap is 15. The single agent actually got 58 different cases right at least once, one more than rules, it just doesn't get them right every time. Two thirds of its misses are plans the validator sent back, and the most common reason is a plan that doesn't cite the policy section, even though the agent searched the policy in that same run. In the multi-agent setup fetching and citing policy is one agent's whole job, so that almost never happens. It's slower and steadier.
 
-The message row is where I expected the agents to win, and the multi-agent setup gets halfway. Its investigator notices: it passes the bank dispute along and lists the quantity mismatch as an open question. Then the 4B coordinator refunds anyway, ten out of ten. The single agent reads the message itself and caught 4. I tried moving the conflict check to the very top of the coordinator's prompt. It caught 1 and dropped two duplicate charges, so I threw it out. This looks more like a model-size problem than a prompt problem, and I can't test that for free yet.
+![Right every pass, by case family, for each approach](assets/families.svg)
 
-The multi-agent setup is also the slow one: about 112 seconds a case at the median, against 29 for the single agent.
+All the red sits in one row. "Message matters" is the family where the records say refund but the customer's message changes that: they've already disputed the charge with their bank, or they say they sent back two of something the warehouse logged as one. Rules can't read, so they refund all ten. Across the other 60 cases, neither agent setup closed a single one wrongly in any pass. When the small model got lost it ran out of turns or handed the case over, and the validator turned away plans that claimed the wrong outcome.
+
+The message row is where I expected the agents to win, and the multi-agent setup gets halfway. Its investigator notices: it passes the bank dispute along and lists the quantity mismatch as an open question. Then the 4B coordinator refunds anyway, ten out of ten, every pass. The single agent reads the message itself and catches 4 every time, 6 at least once. I tried moving the conflict check to the very top of the coordinator's prompt. It caught 1 and dropped two duplicate charges, so I threw it out. This looks more like a model-size problem than a prompt problem, and I can't test that for free yet.
+
+One label changed after the first version of these numbers. A refund still pending at the provider used to count as done. Now it goes to a person, because a pending refund can still fail and nothing in Recon watches a refund it didn't send. I changed the validator and the label together and froze the splits again. The charts and the table in this section all come from runs on the new ones.
 
 ### When the model holds the refund tool
 
@@ -149,7 +160,7 @@ To run an approach over a frozen split and get a report:
 uv run recon eval --split val --arm rules
 uv run recon eval --split val --arm graph --model ollama:qwen3:4b-instruct
 uv run recon eval --split val --arm single --model ollama:qwen3:4b-instruct
-uv run recon report results/eval/<run> results/eval/<other run>
+uv run recon report results/eval/<run> results/eval/<other run>   # same approach twice or more adds what flips
 uv run recon b3 --model ollama:qwen3:4b-instruct   # the agent that holds the refund tool
 ```
 
@@ -187,6 +198,5 @@ tests/             unit, e2e, faults, boundary
 ## Not done yet
 
 - The agent runs with a bigger model. Gemini's free tier allows 20 calls a day per model and one multi-agent validation run needs around 600, so for now the hosted model only shows up in a few recorded test cases.
-- Repeat runs. Every number above is one pass per case, so I don't know yet how often a case flips between runs.
-- Held-out runs. They wait until the end so nothing gets tuned on them.
+- Held-out runs. A 5-case smoke test checked the plumbing (rules 5/5, multi-agent 4/5). The full 350 run once per approach at the very end, so nothing gets tuned on them.
 - A hosted demo. It stays local on purpose, since this project doesn't spend money.
