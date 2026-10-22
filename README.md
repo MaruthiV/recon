@@ -1,12 +1,12 @@
 # Recon
 
-Agents look into refund tickets. Plain code decides whether money moves.
+Recon is a payment-support console where LLM agents investigate refund cases and deterministic code decides whether any money moves.
 
 ![A duplicate charge refunded once, after the worker was killed right as the provider committed the refund](assets/crash-recovery.gif)
 
 <sub>The worker dies right after the provider commits the refund. A new worker takes over, asks the provider what happened, finds the refund and closes the case. One send, one refund.</sub>
 
-LLM agents are good at the reading side of payment support: pulling up the order, finding the right policy section, catching what a customer said that the records don't show. They're bad at knowing whether a refund went through when a request died halfway.
+Agents are good at the reading side of payment support: pulling up the order, finding the right policy section, catching what a customer said that the records don't show. They're bad at knowing whether a refund went through when a request died halfway.
 
 So here the agents only propose. A validator checks the plan against fresh data, a ledger sends the money under one idempotency key, and a separate verifier checks what actually happened at the provider. It all runs against a Stripe-shaped simulator with synthetic customers, so no real money and no paid APIs.
 
