@@ -214,9 +214,3 @@ packages/          domain rules, storage, provider client, policy retrieval
 evals/             fixtures, the independent verifier, the eval harness
 tests/             unit, e2e, faults, boundary
 ```
-
-## Not done yet
-
-- A bigger model. Gemini's free tier allows 20 calls a day and one multi-agent validation run needs about 600, so the hosted model only shows up in a few recorded test cases.
-- Multi-agent on all 350 held-out cases. That's about 12 hours of a laptop running flat out, so it got 70.
-- A hosted demo. It stays local on purpose, since the project runs on $0.
